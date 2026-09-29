@@ -70,11 +70,39 @@ function address(x: number, y: number) {
     col = Math.round(x / 0.075 - (row & 1) * 0.5);
   return siteIndex.get(`${col * 2 + (row & 1)},${row}`) ?? 0;
 }
-const cloud = Array.from({ length: 18000 }, (_, i) => {
-  const z = (i + 0.5) / 18000,
-    angle = i * 2.3999632297 + 0.35 * Math.sin(i * 127.1);
-  return { z, angle };
+type Particle = Point & { z: number };
+// Camera distance is in sphere radii. This focal length keeps the silhouette round.
+export function createParticleProjection(time: number) {
+  const cx = Math.cos(time * 0.57),
+    sx = Math.sin(time * 0.57),
+    cy = Math.cos(time * 0.83),
+    sy = Math.sin(time * 0.83);
+  return ({ x, y, z }: Particle) => {
+    const ry = y * cx - z * sx,
+      rz = y * sx + z * cx;
+    const rx = x * cy + rz * sy,
+      depth = rz * cy - x * sy;
+    const scale = Math.sqrt(3.2 * 3.2 - 1) / (3.2 - depth);
+    return { x: rx * scale, y: ry * scale, z: depth, scale };
+  };
+}
+const cloud = Array.from({ length: 30000 }, (_, i) => {
+  const z = 1 - (2 * (i + 0.5)) / 30000,
+    angle = i * 2.3999632297 + 0.006 * Math.sin(i * 127.1),
+    // Most points trace a shell; the rest give the currents an interior.
+    radius = i % 7 === 0 ? 0.35 + 0.6 * ((i * 0.754877666) % 1) : 0.98,
+    r = Math.sqrt(1 - z * z) * radius;
+  return { x: Math.cos(angle) * r, y: Math.sin(angle) * r, z: z * radius };
 });
+// Reuse the projection/sort buffer across synchronous draws, including different canvases.
+const particles = cloud.map((_, i) => ({
+  x: 0,
+  y: 0,
+  z: 0,
+  scale: 0,
+  wave: 0,
+  i,
+}));
 const surfaces = new WeakMap<
   object,
   { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D; image: ImageData }
@@ -113,22 +141,34 @@ export function drawOptical(
   pixels.fill(0);
   const cos = Math.cos(rotation),
     sin = Math.sin(rotation);
-  // Every raster splat below is one computed moving particle, not pixel noise.
-  cloud.forEach(({ z, angle }, i) => {
-    const a = angle + time * 1.7 + 0.23 * Math.sin(z * 9 - time * 5);
-    const r =
-      Math.sqrt(1 - z * z) *
-      (0.955 + 0.025 * Math.sin(a * 6 + z * 8 - time * 7));
-    const x = Math.cos(a) * r,
-      y = Math.sin(a) * r;
-    const wave =
+  const project = createParticleProjection(time);
+  for (const particle of particles) {
+    const point = cloud[particle.i];
+    // Latitude-dependent twist is a continuous current, not independent jitter.
+    const flow = 0.32 * Math.sin(point.y * 5 - time * 3.5),
+      c = Math.cos(flow),
+      s = Math.sin(flow);
+    const x = point.x * c + point.z * s,
+      z = point.z * c - point.x * s;
+    Object.assign(particle, project({ x, y: point.y, z }));
+    particle.wave =
       0.5 +
       0.5 *
         Math.sin(
-          y * 14 + x * 5 + z * 6 - time * 10 + 1.7 * Math.sin(x * 4 + time * 2),
+          point.y * 13 +
+            x * 4 +
+            z * 5 -
+            time * 9 +
+            1.4 * Math.sin(x * 3 - time * 1.7),
         );
-    const depth = 0.25 + 0.75 * z;
-    const light = Math.min(220, 65 + depth * (70 + 145 * wave ** 3));
+  }
+  particles.sort((a, b) => a.z - b.z);
+  // Back-to-front splats accumulate premultiplied color and source-over alpha.
+  for (const { x, y, z, scale: perspective, wave, i } of particles) {
+    const depth = (z + 1) / 2;
+    const light = 50 + depth * (25 + 150 * wave ** 3);
+    // Dim currents still need enough optical energy to carry projected chroma.
+    const opacity = (0.3 + 0.65 * depth) * (0.65 + 0.35 * wave * wave);
     let signal = bits ? bits[address(x, y) % bits.length] : 3;
     if (bits && pilots.some((p) => Math.hypot(x - p.x, y - p.y) < 0.064))
       signal = 2;
@@ -142,14 +182,19 @@ export function drawOptical(
     const px = size / 2 + (x * cos - y * sin) * scale,
       py = size / 2 + (x * sin + y * cos) * scale;
     const pr =
-      (0.003 + 0.0015 * z) * (0.8 + 0.4 * ((i * 0.6180339) % 1)) * scale;
+      (0.0028 + 0.001 * depth) *
+      perspective *
+      (0.8 + 0.4 * ((i * 0.6180339) % 1)) *
+      scale;
     for (let iy = Math.floor(py - pr); iy <= Math.ceil(py + pr); iy++)
       for (let ix = Math.floor(px - pr); ix <= Math.ceil(px + pr); ix++) {
         if (ix < 0 || iy < 0 || ix >= size || iy >= size) continue;
-        const alpha = Math.max(
-          0,
-          Math.min(1, pr + 0.5 - Math.hypot(ix + 0.5 - px, iy + 0.5 - py)),
-        );
+        const alpha =
+          opacity *
+          Math.max(
+            0,
+            Math.min(1, pr + 0.5 - Math.hypot(ix + 0.5 - px, iy + 0.5 - py)),
+          );
         if (!alpha) continue;
         const q = (iy * size + ix) * 4,
           remain = 1 - alpha;
@@ -158,7 +203,7 @@ export function drawOptical(
         pixels[q + 2] = blue * alpha + pixels[q + 2] * remain;
         pixels[q + 3] = 255 * alpha + pixels[q + 3] * remain;
       }
-  });
+  }
   for (let i = 0; i < pixels.length; i += 4)
     if (pixels[i + 3]) {
       const a = 255 / pixels[i + 3];

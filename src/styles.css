@@ -82,6 +82,10 @@ button:active:not(:disabled) {
   justify-content: space-between;
 }
 .wordmark {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  min-height: 44px;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -165,7 +169,7 @@ button:active:not(:disabled) {
   width: 82.8%;
   height: 82.8%;
   object-fit: contain;
-  border-radius: 50%;
+  border-radius: 12px;
   background: #101214;
 }
 .reticle {
@@ -458,6 +462,8 @@ h1 {
   overflow-wrap: anywhere;
   margin: 12px 0 0;
   min-height: 44px;
+  max-height: min(32vh, 280px);
+  overflow: auto;
   color: #e0e5eb;
 }
 .result-actions {

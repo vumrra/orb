@@ -1,5 +1,8 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { Camera } from "../src/camera";
+import { createCanvas } from "@napi-rs/canvas";
+import { drawBar, splitBarFrame } from "../src/bar";
+import { Collector, splitFrames } from "../src/protocol";
 
 afterEach(() => vi.unstubAllGlobals());
 function setup() {
@@ -76,9 +79,9 @@ it("captures the whole landscape frame, preserving off-center signals", async ()
   Object.assign(video, { readyState: 2, videoWidth: 1280, videoHeight: 720 });
   const drawImage = vi.fn();
   const getImageData = vi.fn(() => ({
-    width: 640,
-    height: 360,
-    data: new Uint8ClampedArray(640 * 360 * 4),
+    width: 1024,
+    height: 576,
+    data: new Uint8ClampedArray(1024 * 576 * 4),
   }));
   vi.stubGlobal("document", {
     createElement: () => ({
@@ -98,7 +101,104 @@ it("captures the whole landscape frame, preserving off-center signals", async ()
   const camera = new Camera();
   await camera.start(video, "environment", vi.fn(), vi.fn());
   tick(0);
-  expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 640, 360);
-  expect(getImageData).toHaveBeenCalledWith(0, 0, 640, 360);
+  expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 1024, 576);
+  expect(getImageData).toHaveBeenCalledWith(0, 0, 1024, 576);
+  camera.stop();
+});
+it("skips hidden captures and resumes full-frame scanning when visible", async () => {
+  const { video } = setup();
+  Object.assign(video, { readyState: 2, videoWidth: 1280, videoHeight: 720 });
+  const drawImage = vi.fn(),
+    doc = {
+      hidden: true,
+      createElement: () => ({
+        width: 0,
+        height: 0,
+        getContext: () => ({
+          drawImage,
+          getImageData: () => ({
+            width: 1024,
+            height: 576,
+            data: new Uint8ClampedArray(1024 * 576 * 4),
+          }),
+        }),
+      }),
+    };
+  vi.stubGlobal("document", doc);
+  let tick!: (time: number) => void;
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    vi.fn((fn) => {
+      tick = fn;
+      return 7;
+    }),
+  );
+  const camera = new Camera();
+  await camera.start(video, "environment", vi.fn(), vi.fn());
+  tick(0);
+  expect(drawImage).not.toHaveBeenCalled();
+  doc.hidden = false;
+  tick(50);
+  expect(drawImage).toHaveBeenCalledOnce();
+  camera.stop();
+});
+
+it("passes raster pixels through Camera and Collector, clearing incomplete fragments on stop", async () => {
+  setup();
+  const source = createCanvas(1280, 720),
+    ctx = source.getContext("2d");
+  const video = Object.assign(source, {
+    play: vi.fn().mockResolvedValue(undefined),
+    pause: vi.fn(),
+    readyState: 2,
+    videoWidth: 1280,
+    videoHeight: 720,
+    srcObject: null,
+  }) as unknown as HTMLVideoElement;
+  vi.stubGlobal("document", {
+    hidden: false,
+    createElement: () => createCanvas(1, 1),
+  });
+  let tick!: (time: number) => void,
+    now = 0;
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    vi.fn((fn) => {
+      tick = fn;
+      return 7;
+    }),
+  );
+  const camera = new Camera(),
+    collector = new Collector(),
+    delivered = vi.fn((frame: Uint8Array) => collector.add(frame));
+  const [frame] = splitFrames(new TextEncoder().encode("pixels"));
+  const symbols = splitBarFrame(frame);
+  const paint = (index: number) => {
+    ctx.fillStyle = "#090909";
+    ctx.fillRect(0, 0, 1280, 720);
+    ctx.save();
+    ctx.translate(970, 350);
+    ctx.rotate(0.23);
+    ctx.scale(-1, 1);
+    drawBar(
+      ctx as unknown as CanvasRenderingContext2D,
+      symbols[index],
+      0,
+      0,
+      330,
+      290,
+    );
+    ctx.restore();
+    tick((now += 160));
+  };
+  await camera.start(video, "environment", delivered, vi.fn());
+  paint(0);
+  camera.stop();
+  await camera.start(video, "environment", delivered, vi.fn());
+  for (const i of [1, 1]) paint(i);
+  expect(delivered).not.toHaveBeenCalled();
+  paint(0);
+  expect(delivered).toHaveBeenCalledOnce();
+  expect(collector.prefix).toBe("pixels");
   camera.stop();
 });

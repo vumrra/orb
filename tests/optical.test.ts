@@ -49,3 +49,28 @@ it("rejects blank and noisy image captures", () => {
     pixels.data[i] = (i * 73 + 19) % 256;
   expect(decodePixels(pixels)).toBeNull();
 });
+it("preserves distant off-center Orb detail in the 1024 full-frame capture path", () => {
+  const [frame] = splitFrames(new TextEncoder().encode("small orb"));
+  const source = createCanvas(1280, 720),
+    ctx = source.getContext("2d");
+  ctx.fillStyle = "#090a0b";
+  ctx.fillRect(0, 0, 1280, 720);
+  drawOptical(
+    ctx as unknown as CanvasRenderingContext2D,
+    frame,
+    1040,
+    270,
+    95,
+    0.21,
+    0.75,
+  );
+  for (const width of [640, 1024]) {
+    const height = (width * 9) / 16,
+      scaled = createCanvas(width, height),
+      out = scaled.getContext("2d");
+    out.drawImage(source, 0, 0, width, height);
+    const result = decodePixels(out.getImageData(0, 0, width, height));
+    if (width === 640) expect(result).toBeNull();
+    else expect(result).toEqual(frame);
+  }
+});

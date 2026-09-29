@@ -117,7 +117,7 @@ test("message alone enables immediate sending, no PIN in either mode", async ({
   ).toBeVisible();
   await page.getByRole("button", { name: "Stop sending" }).click();
   await expect(page.getByLabel("Your message")).toHaveValue("");
-  await page.getByLabel("Your message").fill("가".repeat(129));
+  await page.getByLabel("Your message").fill("🌒".repeat(262144) + "a");
   await expect(page.getByRole("button", { name: "Create orb" })).toBeDisabled();
   await page.getByRole("button", { name: "Receive", exact: true }).click();
   await expect(page.locator("input, .transfer-code, .code-slots")).toHaveCount(
@@ -138,7 +138,7 @@ for (const reduced of [false, true]) {
       reducedMotion: reduced ? "reduce" : "no-preference",
     });
     await page.goto("/");
-    const prefix = "a".repeat(15);
+    const prefix = "a".repeat(6);
     const message = prefix + "🌒한글 " + "z".repeat(20);
     await opticalCamera(page, message);
     await start(page);
@@ -245,11 +245,11 @@ test("checksum failure clears provisional text and stops camera; retry and reset
   page,
 }) => {
   await page.goto("/");
-  const message = "a".repeat(32);
+  const message = "a".repeat(27);
   await opticalCamera(page, message);
   await start(page);
   await expect(page.getByLabel("Received message", { exact: true })).toHaveText(
-    "a".repeat(16),
+    "a".repeat(7),
   );
   await paint(page, 1, "checksum");
   await expect(page.getByRole("alert")).toContainText("checksum");
@@ -277,7 +277,7 @@ for (const action of ["Cancel", "Send"]) {
     await start(page);
     await expect(
       page.getByLabel("Received message", { exact: true }),
-    ).toHaveText("x".repeat(16));
+    ).toHaveText("x".repeat(7));
     await page.getByRole("button", { name: action, exact: true }).click();
     expect(await stopped(page)).toBe(true);
     if (action === "Send")
@@ -343,7 +343,7 @@ test("stale clipboard completion cannot change a reset view", async ({
   page,
 }) => {
   await page.goto("/");
-  await opticalCamera(page, "short message");
+  await opticalCamera(page, "short");
   await start(page);
   await expect(
     page.getByRole("heading", { name: "Message received" }),
@@ -416,7 +416,8 @@ test("candidate reacts before valid data, expires, then receives from an off-cen
   page,
 }) => {
   await page.goto("/");
-  await opticalCamera(page, "acquisition");
+  await page.getByRole("button", { name: "Switch to Bar" }).click();
+  await opticalCamera(page, "acquire");
   await paint(page, 0, "corrupt");
   await start(page);
   await expect(page.getByRole("status")).toContainText("Signal candidate");
@@ -435,7 +436,7 @@ test("candidate reacts before valid data, expires, then receives from an off-cen
     page.getByRole("heading", { name: "Message received" }),
   ).toBeVisible();
   await expect(page.getByLabel("Received message", { exact: true })).toHaveText(
-    "acquisition",
+    "acquire",
   );
 });
 

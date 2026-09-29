@@ -1,12 +1,58 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, useMemo, type ReactNode } from "react";
 import { MetalFx } from "metal-fx";
 import { Orb } from "./Orb";
 import { Camera, cameraError } from "./camera";
-import { Collector, splitFrames, MAX_TEXT_BYTES } from "./protocol";
+import {
+  Collector,
+  createWireFrames,
+  MAX_TEXT_BYTES,
+  type FrameSource,
+} from "./protocol";
+
+import { prepareMessage, decodeMessage } from "./message";
+
+export function ReceivedText({ text }: { text: string }) {
+  // Only examine the bounded tail; keys keep already-visible characters stable.
+  let start = Math.max(0, text.length - 128);
+  if (
+    start &&
+    text.charCodeAt(start) >= 0xdc00 &&
+    text.charCodeAt(start) <= 0xdfff
+  )
+    start++;
+  let offset = start;
+  return (
+    <>
+      {text.slice(0, start)}
+      {Array.from(text.slice(start)).map((character) => {
+        const key = offset;
+        offset += character.length;
+        return (
+          <span className="decoded-character" key={key}>
+            {character}
+          </span>
+        );
+      })}
+    </>
+  );
+}
 
 type Mode = "send" | "receive";
-type Phase = "idle" | "broadcasting" | "requesting" | "scanning" | "received";
-const NO_FRAMES: Uint8Array[] = [];
+type Phase =
+  | "idle"
+  | "preparing"
+  | "decoding"
+  | "broadcasting"
+  | "requesting"
+  | "scanning"
+  | "received";
+const NO_FRAMES: FrameSource = {
+  length: 0,
+  get() {
+    throw new Error("No frames.");
+  },
+  clear() {},
+};
 function Arrow({ down = false }: { down?: boolean }) {
   return (
     <svg
@@ -55,10 +101,11 @@ function Primary({
   );
 }
 export function App() {
+  const [transport, setTransport] = useState<"orb" | "bar">("orb");
   const [mode, setMode] = useState<Mode>("send");
   const [phase, setPhase] = useState<Phase>("idle");
   const [text, setText] = useState("");
-  const [frames, setFrames] = useState<Uint8Array[]>(NO_FRAMES);
+  const [frames, setFrames] = useState<FrameSource>(NO_FRAMES);
   const [received, setReceived] = useState("");
   const [candidate, setCandidate] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -69,12 +116,23 @@ export function App() {
     () => matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
   const camera = useRef(new Camera());
-  const collector = useRef(new Collector());
+  const collector = useRef(new Collector(true));
   const video = useRef<HTMLVideoElement>(null);
   const generation = useRef(0);
-  const frameStore = useRef<Uint8Array[]>(NO_FRAMES);
+  const frameStore = useRef<FrameSource>(NO_FRAMES);
   const copying = useRef(false);
-  const byteCount = new TextEncoder().encode(text).length;
+  const job = useRef<AbortController | null>(null);
+  const updateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  function cancelJobs() {
+    job.current?.abort();
+    job.current = null;
+    if (updateTimer.current !== null) clearTimeout(updateTimer.current);
+    updateTimer.current = null;
+  }
+  const byteCount = useMemo(
+    () => new TextEncoder().encode(text).length,
+    [text],
+  );
   const inCamera = phase === "requesting" || phase === "scanning";
   const locked = phase !== "idle";
   const percent =
@@ -93,18 +151,20 @@ export function App() {
       generation.current++;
       camera.current.stop();
       collector.current.clear();
-      frameStore.current.forEach((frame) => frame.fill(0));
+      frameStore.current.clear();
+      cancelJobs();
     };
   }, []);
 
-  function reset(nextMode = mode) {
+  function reset(nextMode = mode, keepText = false) {
     generation.current++;
     camera.current.stop();
     collector.current.clear();
-    frameStore.current.forEach((frame) => frame.fill(0));
+    frameStore.current.clear();
+    cancelJobs();
     frameStore.current = NO_FRAMES;
     setFrames(NO_FRAMES);
-    setText("");
+    if (!keepText) setText("");
     setReceived("");
     copying.current = false;
     setCopied(false);
@@ -115,20 +175,30 @@ export function App() {
     setMode(nextMode);
   }
 
-  function send() {
+  async function send() {
     if (!byteCount || byteCount > MAX_TEXT_BYTES || phase !== "idle") return;
-    const packet = new TextEncoder().encode(text);
+    const token = ++generation.current;
+    const controller = new AbortController();
+    job.current = controller;
     setError("");
+    setPhase("preparing");
+    let packet: Uint8Array | undefined;
     try {
-      const result = splitFrames(packet);
+      packet = await prepareMessage(text, controller.signal);
+      if (token !== generation.current) return;
+      const result = createWireFrames(packet);
       frameStore.current = result;
       setFrames(result);
       setText("");
       setPhase("broadcasting");
-    } catch {
-      setError("Could not create the orb. Please try again.");
+    } catch (reason) {
+      if (token === generation.current) {
+        setError(cameraError(reason));
+        setPhase("idle");
+      }
     } finally {
-      packet.fill(0);
+      packet?.fill(0);
+      if (token === generation.current) job.current = null;
     }
   }
 
@@ -145,6 +215,7 @@ export function App() {
     const fail = (reason: unknown) => {
       if (token !== generation.current) return;
       generation.current++;
+      cancelJobs();
       camera.current.stop();
       collector.current.clear();
       setReceived("");
@@ -160,17 +231,39 @@ export function App() {
         (frame) => {
           if (token !== generation.current || completed) return;
           const packet = collector.current.add(frame);
-          setProgress({
-            count: collector.current.count,
-            total: collector.current.total,
-          });
-          setReceived(collector.current.prefix);
-          if (!packet) return;
+          const flush = () => {
+            updateTimer.current = null;
+            if (token !== generation.current) return;
+            setProgress({
+              count: collector.current.count,
+              total: collector.current.total,
+            });
+            setReceived(collector.current.prefix);
+          };
+          if (!packet) {
+            if (updateTimer.current === null)
+              updateTimer.current = setTimeout(flush, 100);
+            return;
+          }
           completed = true;
+          if (updateTimer.current !== null) clearTimeout(updateTimer.current);
+          flush();
           camera.current.stop();
           collector.current.clear();
-          packet.fill(0);
-          setPhase("received");
+          setPhase("decoding");
+          const controller = new AbortController();
+          job.current = controller;
+          void decodeMessage(packet, controller.signal)
+            .then((message) => {
+              if (token !== generation.current) return;
+              setReceived(message);
+              setPhase("received");
+            })
+            .catch(fail)
+            .finally(() => {
+              packet.fill(0);
+              if (token === generation.current) job.current = null;
+            });
         },
         fail,
         (visible) => {
@@ -209,20 +302,32 @@ export function App() {
           ? "A message, in light."
           : "Catch the light.";
   const status =
-    phase === "requesting"
-      ? "Waiting for camera permission…"
-      : phase === "scanning"
-        ? progress.total
-          ? `${progress.count} / ${progress.total} frames received`
-          : candidate
-            ? "Signal candidate · checking data…"
-            : "Searching…"
-        : "";
+    phase === "preparing"
+      ? "Preparing message…"
+      : phase === "decoding"
+        ? "Verifying message…"
+        : phase === "requesting"
+          ? "Waiting for camera permission…"
+          : phase === "scanning"
+            ? progress.total
+              ? `${progress.count} / ${progress.total} frames received`
+              : candidate
+                ? "Signal candidate · checking data…"
+                : "Searching…"
+            : "";
 
   return (
     <div className="app-shell">
       <header className="header">
-        <a className="wordmark" href="/" aria-label="Orb home">
+        <button
+          className="wordmark"
+          type="button"
+          aria-label={`Switch to ${transport === "orb" ? "Bar" : "Orb"}`}
+          onClick={() => {
+            reset(mode, phase === "idle");
+            setTransport(transport === "orb" ? "bar" : "orb");
+          }}
+        >
           <svg
             width="23"
             height="23"
@@ -230,25 +335,36 @@ export function App() {
             fill="none"
             aria-hidden="true"
           >
-            <circle
-              cx="12"
-              cy="12"
-              r="8.5"
-              stroke="currentColor"
-              strokeWidth="1"
-            />
-            <ellipse
-              cx="12"
-              cy="12"
-              rx="4"
-              ry="8.5"
-              transform="rotate(35 12 12)"
-              stroke="currentColor"
-              strokeWidth="0.8"
-            />
+            {transport === "bar" ? (
+              <path
+                d="M4 6v12M9 3v18M15 7v10M20 4v16"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              />
+            ) : (
+              <>
+                <circle
+                  cx="12"
+                  cy="12"
+                  r="8.5"
+                  stroke="currentColor"
+                  strokeWidth="1"
+                />
+                <ellipse
+                  cx="12"
+                  cy="12"
+                  rx="4"
+                  ry="8.5"
+                  transform="rotate(35 12 12)"
+                  stroke="currentColor"
+                  strokeWidth="0.8"
+                />
+              </>
+            )}
           </svg>
-          orb
-        </a>
+          {transport === "orb" ? "Orb" : "Bar"}
+        </button>
       </header>
       <main className="main">
         <nav className="mode-switch" aria-label="Transfer mode">
@@ -271,7 +387,12 @@ export function App() {
           <div
             className={`orb-stage ${inCamera ? "camera-active" : ""} ${inCamera && candidate ? "is-candidate" : ""} ${phase === "received" ? "is-received" : ""}`}
           >
-            <Orb frames={frames} reduced={reduced} still={inCamera} />
+            <Orb
+              frames={frames}
+              reduced={reduced}
+              still={inCamera}
+              transport={transport}
+            />
             <video
               ref={video}
               className="camera-video"
@@ -350,11 +471,7 @@ export function App() {
                 aria-live="polite"
                 aria-atomic="true"
               >
-                {Array.from(received).map((character, index) => (
-                  <span className="decoded-character" key={index}>
-                    {character}
-                  </span>
-                ))}
+                <ReceivedText text={received} />
               </pre>
             </div>
           )}
@@ -425,7 +542,8 @@ export function App() {
                     id="byte-count"
                     className={`byte-count ${byteCount > MAX_TEXT_BYTES ? "over-limit" : ""}`}
                   >
-                    {byteCount} / {MAX_TEXT_BYTES} bytes
+                    {byteCount.toLocaleString("en-US")} /{" "}
+                    {MAX_TEXT_BYTES.toLocaleString("en-US")} UTF-8 bytes
                   </span>
                 </div>
               )}
@@ -454,9 +572,13 @@ export function App() {
                 onClick={() => void (mode === "send" ? send() : startCamera())}
               >
                 {locked
-                  ? "Listening for light…"
+                  ? phase === "preparing"
+                    ? "Preparing message…"
+                    : phase === "decoding"
+                      ? "Verifying message…"
+                      : "Listening for light…"
                   : mode === "send"
-                    ? "Create orb"
+                    ? `Create ${transport}`
                     : "Start camera"}
                 {!locked && <Arrow down={mode === "receive"} />}
               </Primary>

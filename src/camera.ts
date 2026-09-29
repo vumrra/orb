@@ -1,12 +1,15 @@
 import { scanPixels } from "./optical";
+import { BarCollector, scanBarPixels } from "./bar";
 export class Camera {
   private generation = 0;
+  private fragments = new BarCollector();
   private stream: MediaStream | null = null;
   private video: HTMLVideoElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
   private raf = 0;
   stop() {
     this.generation++;
+    this.fragments.clear();
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.stream?.getTracks().forEach((track) => track.stop());
@@ -61,6 +64,7 @@ export class Camera {
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx)
         throw new Error("Canvas capture is unavailable in this browser.");
+      let interval = 40;
       let last = -Infinity,
         lastCandidate = -Infinity,
         candidate = false;
@@ -82,16 +86,18 @@ export class Camera {
       const tick = (time: number) => {
         if (generation !== this.generation) return;
         if (
-          time - last >= 60 &&
+          !document.hidden &&
+          time - last >= interval &&
           video.readyState >= 2 &&
           video.videoWidth &&
           video.videoHeight
         ) {
           last = time;
           try {
+            const began = performance.now();
             const scale = Math.min(
               1,
-              640 / Math.max(video.videoWidth, video.videoHeight),
+              1024 / Math.max(video.videoWidth, video.videoHeight),
             );
             const width = Math.round(video.videoWidth * scale),
               height = Math.round(video.videoHeight * scale);
@@ -101,14 +107,23 @@ export class Camera {
             }
             ctx.drawImage(video, 0, 0, width, height);
             const pixels = ctx.getImageData(0, 0, width, height);
-            const result = scanPixels(pixels, () => {
+            const markCandidate = () => {
               lastCandidate = time;
               if (!candidate && generation === this.generation) {
                 candidate = true;
                 onCandidate(true);
               }
-            });
+            };
+            const bar = scanBarPixels(pixels);
+            if (bar.candidate) markCandidate();
+            const result = bar.symbol
+              ? { frame: this.fragments.add(bar.symbol) }
+              : scanPixels(pixels, markCandidate);
+            bar.symbol?.fill(0);
             pixels.data.fill(0);
+            // Leave rendering headroom on slower devices, without throwing away camera detail.
+            interval = Math.max(40, (performance.now() - began) * 3);
+
             if (generation !== this.generation) {
               result.frame?.fill(0);
               return;
