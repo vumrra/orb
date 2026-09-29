@@ -11,6 +11,13 @@ import {
 } from "../src/bar";
 import { Collector, splitFrames } from "../src/protocol";
 
+function reseal(s: Uint8Array) {
+  s[20] &= 15;
+  const crc = crc16(s.subarray(0, 21));
+  s[20] |= (crc & 15) << 4;
+  s[21] = crc >>> 4;
+  s[22] = crc >>> 12;
+}
 const message = "White geometric bars 한글 🌒";
 it("reassembles repeated, missed and reordered fragments without mixing senders or frames", () => {
   const frames = splitFrames(new TextEncoder().encode(message));
@@ -38,16 +45,13 @@ it("requires fragment CRC, original frame CRC and matching original metadata", (
   receiver.clear();
   const forged = a.map((s) => s.slice());
   forged[1][10] ^= 1;
-  new DataView(forged[1].buffer).setUint16(
-    22,
-    crc16(forged[1].subarray(0, 22)),
-  );
+  reseal(forged[1]);
   for (const s of forged) expect(receiver.add(s)).toBeNull();
   receiver.clear();
   const wrongID = a.map((s) => s.slice());
   for (const s of wrongID) {
     s[0] ^= 1;
-    new DataView(s.buffer).setUint16(22, crc16(s.subarray(0, 22)));
+    reseal(s);
     expect(receiver.add(s)).toBeNull();
   }
 });
@@ -204,6 +208,13 @@ it.each(
 )(
   "receives at 30fps capture with %sms phase offset / %sms scan and real spring pixels",
   (offset, scanMs) => {
+    function reseal(s: Uint8Array) {
+      s[20] &= 15;
+      const crc = crc16(s.subarray(0, 21));
+      s[20] |= (crc & 15) << 4;
+      s[21] = crc >>> 4;
+      s[22] = crc >>> 12;
+    }
     const message = "cadence 한글 🌒";
     const symbols = splitFrames(new TextEncoder().encode(message)).flatMap(
       splitBarFrame,
@@ -250,7 +261,7 @@ it("CRC tag collisions cannot emit a mixed frame and valid repeats recover", asy
   let pair: Uint8Array[] | undefined;
   for (let index = 0; index < source.length; index++) {
     const frame = source.get(index),
-      tag = new DataView(frame.buffer).getUint32(36) & 0x7fff;
+      tag = new DataView(frame.buffer).getUint32(36) & 0x7ff;
     if (tags.has(tag)) {
       pair = [tags.get(tag)!, frame];
       break;
@@ -267,4 +278,54 @@ it("CRC tag collisions cannot emit a mixed frame and valid repeats recover", asy
   expect(receiver.add(b[0])).toEqual(pair![1]);
   source.clear();
   receiver.clear();
+});
+it("spreads changing frame data across both halves, including the fixed-header end", () => {
+  const frames = splitFrames(
+    new TextEncoder().encode(
+      Array.from({ length: 200 }, (_, i) =>
+        String.fromCharCode(32 + ((i * 71) % 95)),
+      ).join(""),
+    ),
+  );
+  const c = createCanvas(480, 400),
+    ctx = c.getContext("2d");
+  const images = frames.slice(0, 5).map((frame) => {
+    ctx.fillStyle = "#090909";
+    ctx.fillRect(0, 0, 480, 400);
+    drawBar(
+      ctx as unknown as CanvasRenderingContext2D,
+      splitBarFrame(frame)[0],
+      240,
+      200,
+      330,
+      280,
+    );
+    return ctx.getImageData(0, 0, 480, 400).data;
+  });
+  for (const side of [0, 1]) {
+    let changed = 0;
+    for (let y = 0; y < 400; y++)
+      for (let x = side * 240; x < (side + 1) * 240; x++) {
+        const i = (y * 480 + x) * 4;
+        if (images.some((image) => image[i] !== images[0][i])) changed++;
+      }
+    expect(changed).toBeGreaterThan(2500);
+  }
+});
+
+it("rejects every single transported bit error, including packed metadata and CRC", () => {
+  const [frame] = splitFrames(new TextEncoder().encode("all 180 bits"));
+  for (const symbol of splitBarFrame(frame)) {
+    for (let bit = 0; bit < 180; bit++) {
+      const damaged = symbol.slice();
+      damaged[bit >> 3] ^= 1 << (bit & 7);
+      const receiver = new BarCollector();
+      expect(receiver.add(damaged)).toBeNull();
+      for (const other of splitBarFrame(frame).filter(
+        (s) => !s.every((v, i) => v === symbol[i]),
+      ))
+        expect(receiver.add(other)).toBeNull();
+      expect(receiver.add(symbol)).toEqual(frame);
+    }
+  }
 });

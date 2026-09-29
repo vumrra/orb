@@ -1,10 +1,11 @@
 import { FRAME_BYTES, parseFrame } from "./protocol";
 
-// The same 32 data bars / two 3-bit endpoints; two symbols carry all 40 frame bytes.
-export const BAR_COUNT = 34;
-export const BAR_SYMBOL_MS = 160;
-export const BAR_TRANSITION_MS = 32;
-const SYMBOL_BYTES = 24;
+// 30 data bars plus two rails: two 180-bit symbols carry a v4 frame.
+// Only the fixed magic/version are reconstructed; sender ID and frame CRC remain intact.
+export const BAR_COUNT = 32;
+export const BAR_SYMBOL_MS = 70;
+export const BAR_TRANSITION_MS = 4;
+const SYMBOL_BYTES = 23;
 const BASE = 0.15,
   STEP = 0.04;
 type Point = { x: number; y: number };
@@ -19,11 +20,18 @@ export function crc16(bytes: Uint8Array) {
   }
   return crc;
 }
+// 19 frame bytes, 11-bit routing tag + fragment bit, then CRC16: 180 bits.
+// CRC occupies the upper nibble of byte 20, byte 21 and lower nibble of byte 22.
+function symbolCRC(s: Uint8Array) {
+  const bytes = s.slice(0, 21);
+  bytes[20] &= 15;
+  return crc16(bytes);
+}
 function validSymbol(s: Uint8Array) {
   return (
     s.length === SYMBOL_BYTES &&
-    new DataView(s.buffer, s.byteOffset, s.byteLength).getUint16(22) ===
-      crc16(s.subarray(0, 22))
+    s[22] < 16 &&
+    ((s[20] >>> 4) | (s[21] << 4) | (s[22] << 12)) === symbolCRC(s)
   );
 }
 export function splitBarFrame(frame: Uint8Array): Uint8Array[] {
@@ -33,13 +41,16 @@ export function splitBarFrame(frame: Uint8Array): Uint8Array[] {
   const tag =
     new DataView(frame.buffer, frame.byteOffset, frame.byteLength).getUint32(
       36,
-    ) & 0x7fff;
+    ) & 0x7ff;
   return [0, 1].map((index) => {
     const symbol = new Uint8Array(SYMBOL_BYTES),
       view = new DataView(symbol.buffer);
-    symbol.set(frame.subarray(index * 20, (index + 1) * 20));
-    view.setUint16(20, tag | (index << 15));
-    view.setUint16(22, crc16(symbol.subarray(0, 22)));
+    symbol.set(frame.subarray(2 + index * 19, 2 + (index + 1) * 19));
+    view.setUint16(19, tag | (index << 11), true);
+    const crc = symbolCRC(symbol);
+    symbol[20] |= (crc & 15) << 4;
+    symbol[21] = crc >>> 4;
+    symbol[22] = crc >>> 12;
     return symbol;
   });
 }
@@ -55,10 +66,11 @@ export class BarCollector {
   add(s: Uint8Array): Uint8Array | null {
     if (!validSymbol(s)) return null;
     const value = new DataView(s.buffer, s.byteOffset, s.byteLength).getUint16(
-      20,
+      19,
+      true,
     );
-    const tag = value & 0x7fff,
-      index = value >>> 15;
+    const tag = value & 0x7ff,
+      index = (value >>> 11) & 1;
     let parts = this.pending.get(tag);
     if (!parts) {
       if (this.pending.size >= 64) {
@@ -70,14 +82,15 @@ export class BarCollector {
       this.pending.set(tag, parts);
     }
     parts[index]?.fill(0);
-    parts[index] = s.slice(0, 20);
+    parts[index] = s.slice(0, 19);
     if (!parts[0] || !parts[1]) return null;
     const frame = new Uint8Array(FRAME_BYTES);
-    frame.set(parts[0]);
-    frame.set(parts[1], 20);
+    frame.set([0x4f, 4]);
+    frame.set(parts[0], 2);
+    frame.set(parts[1], 21);
     const parsed = parseFrame(frame);
     const matches =
-      parsed && (new DataView(frame.buffer).getUint32(36) & 0x7fff) === tag;
+      parsed && (new DataView(frame.buffer).getUint32(36) & 0x7ff) === tag;
     parsed?.chunk.fill(0);
     if (matches) {
       for (const part of parts) part?.fill(0);
@@ -88,11 +101,26 @@ export class BarCollector {
     return null;
   }
 }
+function mix(symbol: Uint8Array, inverse = false) {
+  const out = symbol.slice();
+  if (inverse) {
+    for (let i = 0; i < out.length - 1; i++) out[i] ^= out[i + 1];
+    for (let i = out.length - 1; i > 0; i--) out[i] ^= out[i - 1];
+    out[out.length - 1] &= 15;
+  } else {
+    for (let i = 1; i < out.length; i++) out[i] ^= out[i - 1];
+    out[out.length - 1] &= 15;
+    for (let i = out.length - 2; i >= 0; i--) out[i] ^= out[i + 1];
+  }
+  return out;
+}
 function level(symbol: Uint8Array, endpoint: number) {
-  const bit = endpoint * 3,
-    byte = bit >> 3,
-    shift = bit & 7;
-  return ((symbol[byte] | ((symbol[byte + 1] ?? 0) << 8)) >> shift) & 7;
+  let value = 0;
+  for (let j = 0; j < 3; j++) {
+    const bit = ((endpoint * 3 + j) * 53) % 180;
+    value |= ((symbol[bit >> 3] >> (bit & 7)) & 1) << j;
+  }
+  return value;
 }
 export function drawBar(
   ctx: CanvasRenderingContext2D,
@@ -105,30 +133,29 @@ export function drawBar(
   blend = 1,
   time = 0,
 ) {
-  const pitch = width / 33,
-    thickness = pitch * 0.56;
+  const coded = symbol ? mix(symbol) : null,
+    prior = previous ? mix(previous) : null;
+  const pitch = width / 31,
+    thickness = pitch * 0.68;
   ctx.fillStyle = "#ffffff";
   for (let i = 0; i < BAR_COUNT; i++) {
     let top = 0.5,
       bottom = 0.5;
-    if (i > 0 && i < 33) {
+    if (i > 0 && i < 31) {
       const endpoint = (i - 1) * 2;
-      const a = symbol
-        ? level(symbol, endpoint)
+      const a = coded
+        ? level(coded, endpoint)
         : 3.5 + 3.5 * Math.sin(time * 18 + i * 1.7);
-      const b = symbol
-        ? level(symbol, endpoint + 1)
+      const b = coded
+        ? level(coded, endpoint + 1)
         : 3.5 + 3.5 * Math.sin(time * 18 + i * 1.7 + 1);
       top =
         BASE +
-        STEP *
-          (previous ? level(previous, endpoint) * (1 - blend) + a * blend : a);
+        STEP * (prior ? level(prior, endpoint) * (1 - blend) + a * blend : a);
       bottom =
         BASE +
         STEP *
-          (previous
-            ? level(previous, endpoint + 1) * (1 - blend) + b * blend
-            : b);
+          (prior ? level(prior, endpoint + 1) * (1 - blend) + b * blend : b);
     }
     ctx.fillRect(
       cx - width / 2 + i * pitch - thickness / 2,
@@ -296,8 +323,8 @@ export function scanBarPixels({ width, height, data }: Pixels): {
         return light(p.x, p.y);
       };
       let aligned = true;
-      for (let i = 1; i <= 32; i++) {
-        if (sample(i / 33, 0.5) < 160 || sample((i - 0.5) / 33, 0.5) > 100) {
+      for (let i = 1; i <= 30; i++) {
+        if (sample(i / 31, 0.5) < 160 || sample((i - 0.5) / 31, 0.5) > 100) {
           aligned = false;
           break;
         }
@@ -305,13 +332,13 @@ export function scanBarPixels({ width, height, data }: Pixels): {
       if (!aligned) continue;
       candidate = true;
       const levels: number[] = [];
-      for (let i = 1; i <= 32 && aligned; i++)
+      for (let i = 1; i <= 30 && aligned; i++)
         for (const sign of [-1, 1]) {
           let lo = 0,
             hi = 0.49;
           for (let k = 0; k < 10; k++) {
             const m = (lo + hi) / 2;
-            if (sample(i / 33, 0.5 + sign * m) > 128) lo = m;
+            if (sample(i / 31, 0.5 + sign * m) > 128) lo = m;
             else hi = m;
           }
           const value = ((lo + hi) / 2 - BASE) / STEP,
@@ -326,17 +353,18 @@ export function scanBarPixels({ width, height, data }: Pixels): {
       for (const reverse of [false, true])
         for (const flip of [false, true]) {
           const symbol = new Uint8Array(SYMBOL_BYTES);
-          for (let i = 0; i < 64; i++) {
-            const bar = reverse ? 31 - (i >> 1) : i >> 1,
+          for (let i = 0; i < 60; i++) {
+            const bar = reverse ? 29 - (i >> 1) : i >> 1,
               side = (i & 1) ^ (flip ? 1 : 0);
-            const value = levels[bar * 2 + side],
-              bit = i * 3,
-              byte = bit >> 3,
-              shift = bit & 7;
-            symbol[byte] |= value << shift;
-            if (shift > 5) symbol[byte + 1] |= value >> (8 - shift);
+            const value = levels[bar * 2 + side];
+            for (let j = 0; j < 3; j++) {
+              const bit = ((i * 3 + j) * 53) % 180;
+              symbol[bit >> 3] |= ((value >> j) & 1) << (bit & 7);
+            }
           }
-          if (validSymbol(symbol)) return { candidate: true, symbol };
+          const original = mix(symbol, true);
+          if (validSymbol(original))
+            return { candidate: true, symbol: original };
         }
     }
   return { candidate, symbol: null };

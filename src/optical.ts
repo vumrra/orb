@@ -56,7 +56,9 @@ function recover(bits: Uint8Array) {
     if (syndrome) word[syndrome] ^= 1;
     DATA_POSITIONS.forEach((p, i) => (frame[b] |= word[p] << i));
   }
-  return parseFrame(frame) ? frame : null;
+  const parsed = parseFrame(frame);
+  parsed?.chunk.fill(0);
+  return parsed ? frame : null;
 }
 
 const siteIndex = new Map(
@@ -251,9 +253,76 @@ function projection(p: Point[]) {
     };
   };
 }
+type Geometry = {
+  points: Point[];
+  small: number;
+  width: number;
+  height: number;
+};
+function decodeValues(values: number[]) {
+  for (const threshold of [0, -0.025, 0.025, -0.05, 0.05, -0.075]) {
+    const frame = recover(
+      Uint8Array.from(values, (v) => (v > threshold ? 1 : 0)),
+    );
+    if (frame) return frame;
+  }
+  return null;
+}
+export class OpticalTracker {
+  private geometry: Geometry | null = null;
+  private misses = 0;
+  clear() {
+    this.geometry = null;
+    this.misses = 0;
+  }
+  scan(pixels: Pixels, onCandidate?: () => void): OpticalScan {
+    const g = this.geometry;
+    if (
+      g &&
+      g.width === pixels.width &&
+      g.height === pixels.height &&
+      pixels.data.length === pixels.width * pixels.height * 4
+    ) {
+      const project = projection(g.points)!;
+      const values = sites.slice(0, FRAME_BYTES * 12).map((s) => {
+        const q = project(s.x, s.y),
+          r = g.small * 0.023;
+        const x0 = Math.max(0, Math.floor(q.x - r)),
+          x1 = Math.min(pixels.width, Math.ceil(q.x + r));
+        const y0 = Math.max(0, Math.floor(q.y - r)),
+          y1 = Math.min(pixels.height, Math.ceil(q.y + r));
+        let chroma = 0,
+          light = 0;
+        for (let y = y0; y < y1; y++)
+          for (let x = x0; x < x1; x++) {
+            const i = (y * pixels.width + x) * 4,
+              d = pixels.data;
+            chroma += d[i] - d[i + 2];
+            light += (d[i] + 2 * d[i + 1] + d[i + 2]) / 4;
+          }
+        return chroma / (light + Math.max(1, (x1 - x0) * (y1 - y0)));
+      });
+      const frame = decodeValues(values);
+      if (frame) {
+        this.misses = 0;
+        onCandidate?.();
+        return { candidate: true, frame };
+      }
+    }
+    // First miss immediately searches the entire field; repeated misses bound CPU.
+    if (++this.misses >= 3) this.geometry = null;
+    if (this.misses > 1 && this.misses % 3 !== 0)
+      return { candidate: false, frame: null };
+    return scanPixels(pixels, onCandidate, (geometry) => {
+      this.geometry = geometry;
+      this.misses = 0;
+    });
+  }
+}
 export function scanPixels(
   { width, height, data }: Pixels,
   onCandidate?: () => void,
+  onGeometry?: (geometry: Geometry) => void,
 ): OpticalScan {
   const empty = { candidate: false, frame: null };
   if (
@@ -400,14 +469,15 @@ export function scanPixels(
                     (mean(q.x, q.y, small * 0.023) + 1)
                   );
                 });
-                for (const threshold of [
-                  0, -0.025, 0.025, -0.05, 0.05, -0.075,
-                ]) {
-                  const bits = Uint8Array.from(values, (v) =>
-                      v > threshold ? 1 : 0,
-                    ),
-                    frame = recover(bits);
-                  if (frame) return { candidate: true, frame };
+                const frame = decodeValues(values);
+                if (frame) {
+                  onGeometry?.({
+                    points: p.map((_, i) => p[(turn + direction * i + 8) % 4]),
+                    small,
+                    width,
+                    height,
+                  });
+                  return { candidate: true, frame };
                 }
               }
           }

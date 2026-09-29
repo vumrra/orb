@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useMemo, type ReactNode } from "react";
 import { MetalFx } from "metal-fx";
 import { Orb } from "./Orb";
 import { Camera, cameraError } from "./camera";
+import { Sound, soundError } from "./sound-runtime";
 import {
   Collector,
   createWireFrames,
@@ -101,7 +102,7 @@ function Primary({
   );
 }
 export function App() {
-  const [transport, setTransport] = useState<"orb" | "bar">("orb");
+  const [transport, setTransport] = useState<"orb" | "bar" | "sound">("orb");
   const [mode, setMode] = useState<Mode>("send");
   const [phase, setPhase] = useState<Phase>("idle");
   const [text, setText] = useState("");
@@ -116,6 +117,8 @@ export function App() {
     () => matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
   const camera = useRef(new Camera());
+  const sound = useRef(new Sound());
+  const errorText = transport === "sound" ? soundError : cameraError;
   const collector = useRef(new Collector(true));
   const video = useRef<HTMLVideoElement>(null);
   const generation = useRef(0);
@@ -133,7 +136,8 @@ export function App() {
     () => new TextEncoder().encode(text).length,
     [text],
   );
-  const inCamera = phase === "requesting" || phase === "scanning";
+  const inCamera =
+    transport !== "sound" && (phase === "requesting" || phase === "scanning");
   const locked = phase !== "idle";
   const percent =
     phase === "received"
@@ -150,6 +154,7 @@ export function App() {
       media.removeEventListener("change", change);
       generation.current++;
       camera.current.stop();
+      sound.current.stop();
       collector.current.clear();
       frameStore.current.clear();
       cancelJobs();
@@ -159,6 +164,7 @@ export function App() {
   function reset(nextMode = mode, keepText = false) {
     generation.current++;
     camera.current.stop();
+    sound.current.stop();
     collector.current.clear();
     frameStore.current.clear();
     cancelJobs();
@@ -184,6 +190,8 @@ export function App() {
     setPhase("preparing");
     let packet: Uint8Array | undefined;
     try {
+      if (transport === "sound" && !(await sound.current.open())) return;
+      if (token !== generation.current) return;
       packet = await prepareMessage(text, controller.signal);
       if (token !== generation.current) return;
       const result = createWireFrames(packet);
@@ -191,9 +199,18 @@ export function App() {
       setFrames(result);
       setText("");
       setPhase("broadcasting");
+      if (transport === "sound")
+        sound.current.send(result, (reason) => {
+          if (token !== generation.current) return;
+          reset();
+          setError(soundError(reason));
+        });
     } catch (reason) {
       if (token === generation.current) {
-        setError(cameraError(reason));
+        sound.current.stop();
+        frameStore.current.clear();
+        setFrames(NO_FRAMES);
+        setError(errorText(reason));
         setPhase("idle");
       }
     } finally {
@@ -203,7 +220,7 @@ export function App() {
   }
 
   async function startCamera() {
-    if (phase !== "idle" || !video.current) return;
+    if (phase !== "idle" || (transport !== "sound" && !video.current)) return;
     const token = ++generation.current;
     let completed = false;
     collector.current.clear();
@@ -217,59 +234,66 @@ export function App() {
       generation.current++;
       cancelJobs();
       camera.current.stop();
+      sound.current.stop();
       collector.current.clear();
       setReceived("");
       setCandidate(false);
       setProgress({ count: 0, total: 0 });
       setPhase("idle");
-      setError(cameraError(reason));
+      setError(errorText(reason));
     };
     try {
-      const started = await camera.current.start(
-        video.current,
-        facing,
-        (frame) => {
-          if (token !== generation.current || completed) return;
-          const packet = collector.current.add(frame);
-          const flush = () => {
-            updateTimer.current = null;
+      const onFrame = (frame: Uint8Array) => {
+        if (token !== generation.current || completed) return;
+        const packet = collector.current.add(frame);
+        const flush = () => {
+          updateTimer.current = null;
+          if (token !== generation.current) return;
+          setProgress({
+            count: collector.current.count,
+            total: collector.current.total,
+          });
+          setReceived(collector.current.prefix);
+        };
+        if (!packet) {
+          if (updateTimer.current === null)
+            updateTimer.current = setTimeout(flush, 100);
+          return;
+        }
+        completed = true;
+        if (updateTimer.current !== null) clearTimeout(updateTimer.current);
+        flush();
+        camera.current.stop();
+        sound.current.stop();
+        collector.current.clear();
+        setPhase("decoding");
+        const controller = new AbortController();
+        job.current = controller;
+        void decodeMessage(packet, controller.signal)
+          .then((message) => {
             if (token !== generation.current) return;
-            setProgress({
-              count: collector.current.count,
-              total: collector.current.total,
-            });
-            setReceived(collector.current.prefix);
-          };
-          if (!packet) {
-            if (updateTimer.current === null)
-              updateTimer.current = setTimeout(flush, 100);
-            return;
-          }
-          completed = true;
-          if (updateTimer.current !== null) clearTimeout(updateTimer.current);
-          flush();
-          camera.current.stop();
-          collector.current.clear();
-          setPhase("decoding");
-          const controller = new AbortController();
-          job.current = controller;
-          void decodeMessage(packet, controller.signal)
-            .then((message) => {
-              if (token !== generation.current) return;
-              setReceived(message);
-              setPhase("received");
-            })
-            .catch(fail)
-            .finally(() => {
-              packet.fill(0);
-              if (token === generation.current) job.current = null;
-            });
-        },
-        fail,
-        (visible) => {
-          if (token === generation.current && !completed) setCandidate(visible);
-        },
-      );
+            setReceived(message);
+            setPhase("received");
+          })
+          .catch(fail)
+          .finally(() => {
+            packet.fill(0);
+            if (token === generation.current) job.current = null;
+          });
+      };
+      const onCandidate = (visible: boolean) => {
+        if (token === generation.current && !completed) setCandidate(visible);
+      };
+      const started =
+        transport === "sound"
+          ? await sound.current.receive(onFrame, fail, onCandidate)
+          : await camera.current.start(
+              video.current!,
+              facing,
+              onFrame,
+              fail,
+              onCandidate,
+            );
       if (started && token === generation.current && !completed)
         setPhase("scanning");
     } catch (reason) {
@@ -295,19 +319,25 @@ export function App() {
 
   const title =
     phase === "broadcasting"
-      ? "Ready to scan"
+      ? transport === "sound"
+        ? "Sending in sound"
+        : "Ready to scan"
       : phase === "received"
         ? "Message received"
         : mode === "send"
-          ? "A message, in light."
-          : "Catch the light.";
+          ? transport === "sound"
+            ? "A message, in sound."
+            : "A message, in light."
+          : transport === "sound"
+            ? "Catch the sound."
+            : "Catch the light.";
   const status =
     phase === "preparing"
       ? "Preparing message…"
       : phase === "decoding"
         ? "Verifying message…"
         : phase === "requesting"
-          ? "Waiting for camera permission…"
+          ? `Waiting for ${transport === "sound" ? "microphone" : "camera"} permission…`
           : phase === "scanning"
             ? progress.total
               ? `${progress.count} / ${progress.total} frames received`
@@ -322,10 +352,16 @@ export function App() {
         <button
           className="wordmark"
           type="button"
-          aria-label={`Switch to ${transport === "orb" ? "Bar" : "Orb"}`}
+          aria-label={`Switch to ${transport === "orb" ? "Bar" : transport === "bar" ? "Sound" : "Orb"}`}
           onClick={() => {
             reset(mode, phase === "idle");
-            setTransport(transport === "orb" ? "bar" : "orb");
+            setTransport(
+              transport === "orb"
+                ? "bar"
+                : transport === "bar"
+                  ? "sound"
+                  : "orb",
+            );
           }}
         >
           <svg
@@ -335,7 +371,14 @@ export function App() {
             fill="none"
             aria-hidden="true"
           >
-            {transport === "bar" ? (
+            {transport === "sound" ? (
+              <path
+                d="M4 10v4m4-7v10m4-13v16m4-13v10m4-7v4"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinecap="round"
+              />
+            ) : transport === "bar" ? (
               <path
                 d="M4 6v12M9 3v18M15 7v10M20 4v16"
                 stroke="currentColor"
@@ -363,7 +406,7 @@ export function App() {
               </>
             )}
           </svg>
-          {transport === "orb" ? "Orb" : "Bar"}
+          {transport === "orb" ? "Orb" : transport === "bar" ? "Bar" : "Sound"}
         </button>
       </header>
       <main className="main">
@@ -392,6 +435,7 @@ export function App() {
               reduced={reduced}
               still={inCamera}
               transport={transport}
+              meter={sound.current.meter}
             />
             <video
               ref={video}
@@ -401,21 +445,23 @@ export function App() {
               aria-label="Camera preview"
               style={{ visibility: inCamera ? "visible" : "hidden" }}
             />
-            {mode === "receive" && phase !== "received" && (
-              <div className="reticle" aria-hidden="true">
-                <i />
-                <i />
-                <i />
-                <i />
-                <span className="target-label">
-                  {candidate ? "Signal acquired" : ""}
-                </span>
-              </div>
-            )}
-            {inCamera && (
+            {mode === "receive" &&
+              transport !== "sound" &&
+              phase !== "received" && (
+                <div className="reticle" aria-hidden="true">
+                  <i />
+                  <i />
+                  <i />
+                  <i />
+                  <span className="target-label">
+                    {candidate ? "Signal acquired" : ""}
+                  </span>
+                </div>
+              )}
+            {(inCamera || (transport === "sound" && phase === "scanning")) && (
               <span className="camera-indicator">
                 <span />
-                Camera on
+                {transport === "sound" ? "Microphone on" : "Camera on"}
               </span>
             )}
             {phase === "received" && (
@@ -511,7 +557,7 @@ export function App() {
             <>
               <div className="broadcast-note">
                 <span className="live-dot" />
-                Optical stream
+                {transport === "sound" ? "Acoustic stream" : "Optical stream"}
               </div>
               <Primary reduced={reduced} onClick={() => reset()}>
                 Stop sending <span aria-hidden="true">×</span>
@@ -547,21 +593,23 @@ export function App() {
                   </span>
                 </div>
               )}
-              {mode === "receive" && phase === "idle" && (
-                <div className="camera-choice">
-                  <label htmlFor="camera-facing">Camera</label>
-                  <select
-                    id="camera-facing"
-                    value={facing}
-                    onChange={(event) =>
-                      setFacing(event.target.value as "environment" | "user")
-                    }
-                  >
-                    <option value="environment">Back / default</option>
-                    <option value="user">Front / webcam</option>
-                  </select>
-                </div>
-              )}
+              {mode === "receive" &&
+                transport !== "sound" &&
+                phase === "idle" && (
+                  <div className="camera-choice">
+                    <label htmlFor="camera-facing">Camera</label>
+                    <select
+                      id="camera-facing"
+                      value={facing}
+                      onChange={(event) =>
+                        setFacing(event.target.value as "environment" | "user")
+                      }
+                    >
+                      <option value="environment">Back / default</option>
+                      <option value="user">Front / webcam</option>
+                    </select>
+                  </div>
+                )}
               <Primary
                 reduced={reduced}
                 disabled={
@@ -576,10 +624,14 @@ export function App() {
                     ? "Preparing message…"
                     : phase === "decoding"
                       ? "Verifying message…"
-                      : "Listening for light…"
+                      : transport === "sound"
+                        ? "Listening for sound…"
+                        : "Listening for light…"
                   : mode === "send"
                     ? `Create ${transport}`
-                    : "Start camera"}
+                    : transport === "sound"
+                      ? "Start microphone"
+                      : "Start camera"}
                 {!locked && <Arrow down={mode === "receive"} />}
               </Primary>
               {locked && (

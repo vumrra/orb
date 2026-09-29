@@ -23,11 +23,13 @@ export function Orb({
   reduced,
   still = false,
   transport = "orb",
+  meter,
 }: {
   frames: FrameSource;
   reduced: boolean;
   still?: boolean;
-  transport?: "orb" | "bar";
+  transport?: "orb" | "bar" | "sound";
+  meter?: { level: number; waveform?: Float32Array };
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
@@ -39,7 +41,9 @@ export function Orb({
       timer = 0,
       last = -Infinity,
       index = -1;
-    const symbolCount = frames.length * (transport === "bar" ? 2 : 1);
+    const symbolCount =
+      (transport === "sound" ? 0 : frames.length) *
+      (transport === "bar" ? 2 : 1);
     let cachedIndex = -1;
     let current: Uint8Array | null = null,
       previous: Uint8Array | null = null;
@@ -50,7 +54,9 @@ export function Orb({
       if (transport !== "bar") return frame;
       const parts = splitBarFrame(frame);
       frame.fill(0);
-      parts[1 - (index % 2)].fill(0);
+      parts.forEach((part, i) => {
+        if (i !== index % 2) part.fill(0);
+      });
       return parts[index % 2];
     }
     const cadence = transport === "bar" ? BAR_SYMBOL_MS : SYMBOL_MS;
@@ -62,7 +68,8 @@ export function Orb({
         ? Math.floor((now - start) / cadence) % symbolCount
         : -1;
       if (
-        (!reduced && !still && now - last >= 16) ||
+        ((transport === "sound" || (!reduced && !still)) &&
+          now - last >= (reduced ? 100 : 16)) ||
         frame !== index ||
         last === -Infinity
       ) {
@@ -76,12 +83,61 @@ export function Orb({
           cachedIndex = frame;
         }
         ctx.clearRect(0, 0, el.width, el.height);
-        if (transport === "bar") {
+        if (transport === "sound") {
+          const level = meter?.level ?? 0;
+          const center = el.width / 2;
+          ctx.strokeStyle = "#fff";
+          // Acoustic energy controls radius and opacity; no fabricated data waveform.
+          for (let ring = 0; ring < 3; ring++) {
+            ctx.globalAlpha = (0.13 + level * 0.65) / (ring + 1);
+            ctx.lineWidth = ring === 0 ? 2.4 : 1;
+            ctx.beginPath();
+            ctx.arc(
+              center,
+              center,
+              el.width * (0.16 + ring * 0.065 + level * 0.06),
+              0,
+              Math.PI * 2,
+            );
+            ctx.stroke();
+          }
+          ctx.globalAlpha = 1;
+          // The trace is sampled PCM, not an invented progress animation.
+          const samples = meter?.waveform;
+          const width = el.width * 0.76;
+          const ink = ctx.createLinearGradient(
+            center - width / 2,
+            0,
+            center + width / 2,
+            0,
+          );
+          ink.addColorStop(0, "rgba(180,203,220,0)");
+          ink.addColorStop(0.25, "rgba(200,218,231,0.65)");
+          ink.addColorStop(0.5, "#ffffff");
+          ink.addColorStop(0.75, "rgba(200,218,231,0.65)");
+          ink.addColorStop(1, "rgba(180,203,220,0)");
+          ctx.strokeStyle = ink;
+          ctx.lineWidth = 2.5;
+          ctx.lineCap = "round";
+          for (let i = 0; i < 64; i++) {
+            const envelope = Math.sin((Math.PI * i) / 63);
+            const amplitude = Math.abs(samples?.[i] ?? 0) * el.width * 1.7;
+            const height =
+              1.5 + Math.min(el.width * 0.19, amplitude) * envelope;
+            const x = center - width / 2 + (width * i) / 63;
+            ctx.beginPath();
+            ctx.moveTo(x, center - height);
+            ctx.lineTo(x, center + height);
+            ctx.stroke();
+          }
+          ctx.lineCap = "butt";
+        } else if (transport === "bar") {
           const elapsed = (now - start) % cadence;
           const t = Math.min(1, elapsed / BAR_TRANSITION_MS);
-          // A short spring snap, then exact stable endpoints for >=128ms at 30fps.
+          // Data symbols snap to exact heights: a blended camera sample is invalid.
+          // Keep spring motion only for the non-transmitting preview.
           const blend =
-            reduced || still || t === 1
+            current || reduced || still || t === 1
               ? 1
               : 1 - Math.exp(-6 * t) * Math.cos(8 * t);
           drawBar(
@@ -106,7 +162,7 @@ export function Orb({
             reduced || still ? 0.75 : (now - start) / 1000 + 0.75,
           );
       }
-      if (reduced || still) {
+      if ((reduced || still) && transport !== "sound") {
         if (frames.length)
           timer = window.setTimeout(() => render(performance.now()), 40);
       } else raf = requestAnimationFrame(render);
@@ -126,7 +182,7 @@ export function Orb({
       current?.fill(0);
       previous?.fill(0);
     };
-  }, [frames, reduced, still, transport]);
+  }, [frames, reduced, still, transport, meter]);
   return (
     <canvas
       ref={canvas}
@@ -135,13 +191,15 @@ export function Orb({
       className="orb-canvas"
       role="img"
       aria-label={
-        transport === "bar"
-          ? frames.length
-            ? "White bars carrying the message"
-            : "White geometric bars"
-          : frames.length
-            ? "Moving light carrying the message"
-            : "A flowing silver particle orb"
+        transport === "sound"
+          ? "Acoustic signal level"
+          : transport === "bar"
+            ? frames.length
+              ? "White bars carrying the message"
+              : "White geometric bars"
+            : frames.length
+              ? "Moving light carrying the message"
+              : "A flowing silver particle orb"
       }
     />
   );

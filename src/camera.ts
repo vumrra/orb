@@ -1,8 +1,10 @@
-import { scanPixels } from "./optical";
+import { OpticalTracker } from "./optical";
 import { BarCollector, scanBarPixels } from "./bar";
 export class Camera {
   private generation = 0;
   private fragments = new BarCollector();
+  private optical = new OpticalTracker();
+  private detected: "orb" | "bar" | null = null;
   private stream: MediaStream | null = null;
   private video: HTMLVideoElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
@@ -10,6 +12,8 @@ export class Camera {
   stop() {
     this.generation++;
     this.fragments.clear();
+    this.optical.clear();
+    this.detected = null;
     cancelAnimationFrame(this.raf);
     this.raf = 0;
     this.stream?.getTracks().forEach((track) => track.stop());
@@ -64,7 +68,7 @@ export class Camera {
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx)
         throw new Error("Canvas capture is unavailable in this browser.");
-      let interval = 40;
+      let interval = 25;
       let last = -Infinity,
         lastCandidate = -Infinity,
         candidate = false;
@@ -114,15 +118,24 @@ export class Camera {
                 onCandidate(true);
               }
             };
-            const bar = scanBarPixels(pixels);
-            if (bar.candidate) markCandidate();
-            const result = bar.symbol
-              ? { frame: this.fragments.add(bar.symbol) }
-              : scanPixels(pixels, markCandidate);
-            bar.symbol?.fill(0);
+            let result: { frame: Uint8Array | null } = { frame: null };
+            const opticalFirst = this.detected === "orb";
+            if (opticalFirst) result = this.optical.scan(pixels, markCandidate);
+            if (!result.frame) {
+              const bar = scanBarPixels(pixels);
+              if (bar.candidate) markCandidate();
+              if (bar.symbol) {
+                this.detected = "bar";
+                result = { frame: this.fragments.add(bar.symbol) };
+                bar.symbol.fill(0);
+              } else if (!opticalFirst) {
+                result = this.optical.scan(pixels, markCandidate);
+                if (result.frame) this.detected = "orb";
+              }
+            }
             pixels.data.fill(0);
             // Leave rendering headroom on slower devices, without throwing away camera detail.
-            interval = Math.max(40, (performance.now() - began) * 3);
+            interval = Math.max(25, (performance.now() - began) * 1.5);
 
             if (generation !== this.generation) {
               result.frame?.fill(0);

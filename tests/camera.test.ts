@@ -195,7 +195,7 @@ it("passes raster pixels through Camera and Collector, clearing incomplete fragm
   paint(0);
   camera.stop();
   await camera.start(video, "environment", delivered, vi.fn());
-  for (const i of [1, 1]) paint(i);
+  for (const i of [1, 1, 2]) paint(i);
   expect(delivered).not.toHaveBeenCalled();
   paint(0);
   expect(delivered).toHaveBeenCalledOnce();
