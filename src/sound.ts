@@ -1,4 +1,10 @@
 import { FRAME_BYTES, parseFrame } from "./protocol";
+import {
+  packSoundBurst,
+  unpackSoundBurst,
+  burstSize,
+  SOUND_BURST_FRAMES,
+} from "./sound-burst";
 
 // Eight independent 4-FSK lanes: 16 bits per 16ms symbol, audible 875–4750Hz.
 // Four clock/preamble symbols, 20 frame symbols, two silent guard symbols.
@@ -13,6 +19,24 @@ export function encodeSound(frame: Uint8Array, rate: number): Float32Array {
   const words = [...PREAMBLE];
   for (let i = 0; i < FRAME_BYTES; i += 2)
     words.push(frame[i] | (frame[i + 1] << 8));
+  return encodeWords(words, rate);
+}
+export function encodeSoundBurst(
+  frames: Uint8Array[],
+  rate: number,
+): Float32Array {
+  const code = packSoundBurst(frames);
+  const words = [
+    ...PREAMBLE.slice(0, 3),
+    0x7272,
+    frames.length | ((frames.length ^ 255) << 8),
+  ];
+  for (let i = 0; i < code.length; i += 2)
+    words.push(code[i] | ((code[i + 1] ?? 0) << 8));
+  code.fill(0);
+  return encodeWords(words, rate);
+}
+function encodeWords(words: number[], rate: number) {
   const pcm = new Float32Array(
     Math.round((words.length + 2) * SOUND_SYMBOL_SECONDS * rate),
   );
@@ -102,7 +126,13 @@ export class SoundDecoder {
     return word;
   }
   push(chunk: Float32Array) {
-    // Retain at most one incomplete 384ms frame, independent of callback boundaries.
+    // Bound allocation even when a caller supplies an entire recording.
+    if (chunk.length > 4096) {
+      for (let i = 0; i < chunk.length; i += 4096)
+        this.push(chunk.subarray(i, i + 4096));
+      return;
+    }
+    // Retain at most one incomplete burst (about 4s), independent of callbacks.
     const joined = new Float32Array(
       this.samples.length - this.cursor + chunk.length,
     );
@@ -120,7 +150,7 @@ export class SoundDecoder {
     while (this.cursor + span <= this.samples.length) {
       const at = this.cursor;
       let valid = true;
-      for (let s = 0; s < 4; s++)
+      for (let s = 0; s < 3; s++)
         if (
           this.word(at + Math.round(s * SOUND_SYMBOL_SECONDS * this.rate)) !==
           PREAMBLE[s]
@@ -128,6 +158,66 @@ export class SoundDecoder {
           valid = false;
           break;
         }
+      if (
+        valid &&
+        this.word(at + Math.round(3 * SOUND_SYMBOL_SECONDS * this.rate)) ===
+          0x7272
+      ) {
+        const marker = this.word(
+          at + Math.round(4 * SOUND_SYMBOL_SECONDS * this.rate),
+        );
+        const count = marker & 255;
+        if (
+          count >= 1 &&
+          count <= SOUND_BURST_FRAMES &&
+          marker >>> 8 === (count ^ 255)
+        ) {
+          const size = burstSize(count),
+            symbols = 5 + Math.ceil(size / 2);
+          const needed = Math.ceil(
+            symbols * SOUND_SYMBOL_SECONDS * this.rate * 1.0015,
+          );
+          if (at + needed > this.samples.length) break;
+          let recovered: Uint8Array[] = [];
+          for (const ratio of [1, 0.9985, 1.0015]) {
+            const code = new Uint8Array(size),
+              erasures: number[] = [];
+            for (let s = 0; s < Math.ceil(size / 2); s++) {
+              const word = this.word(
+                at +
+                  Math.round(
+                    (s + 5) * SOUND_SYMBOL_SECONDS * this.rate * ratio,
+                  ),
+              );
+              if (word < 0) {
+                erasures.push(s * 2);
+                if (s * 2 + 1 < size) erasures.push(s * 2 + 1);
+              } else {
+                code[s * 2] = word;
+                if (s * 2 + 1 < size) code[s * 2 + 1] = word >>> 8;
+              }
+            }
+            recovered = unpackSoundBurst(code, count, erasures);
+            code.fill(0);
+            if (recovered.length) break;
+          }
+          if (recovered.length) {
+            this.cursor += Math.floor(
+              symbols * SOUND_SYMBOL_SECONDS * this.rate * 0.9985,
+            );
+            try {
+              for (const frame of recovered) this.onFrame(frame);
+            } finally {
+              recovered.forEach((f) => f.fill(0));
+            }
+            continue;
+          }
+        }
+      }
+      valid =
+        valid &&
+        this.word(at + Math.round(3 * SOUND_SYMBOL_SECONDS * this.rate)) ===
+          PREAMBLE[3];
       if (valid) {
         const frame = new Uint8Array(FRAME_BYTES);
         for (let s = 0; s < 20; s++) {

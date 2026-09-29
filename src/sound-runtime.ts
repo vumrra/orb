@@ -1,5 +1,7 @@
 import type { FrameSource } from "./protocol";
-import { encodeSound, SoundDecoder } from "./sound";
+import { encodeSoundBurst, SoundDecoder } from "./sound";
+
+import { SOUND_BURST_FRAMES } from "./sound-burst";
 
 const SOUND_GAIN = 0.15;
 
@@ -110,12 +112,15 @@ export class Sound {
         // Bounded lookahead; never materialize an entire message or loop in PCM.
         while (next < context.currentTime + 0.35) {
           if (next < context.currentTime) next = context.currentTime + 0.02;
-          const frame = frames.get(index++ % frames.length);
+          const batch: Uint8Array[] = [];
+          if (index >= frames.length) index = 0;
           let pcm: Float32Array;
           try {
-            pcm = encodeSound(frame, context.sampleRate);
+            const count = Math.min(SOUND_BURST_FRAMES, frames.length - index);
+            for (let i = 0; i < count; i++) batch.push(frames.get(index++));
+            pcm = encodeSoundBurst(batch, context.sampleRate);
           } finally {
-            frame.fill(0);
+            batch.forEach((frame) => frame.fill(0));
           }
           const buffer = context.createBuffer(
             1,

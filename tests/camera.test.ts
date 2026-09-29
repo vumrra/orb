@@ -1,14 +1,22 @@
 import { afterEach, expect, it, vi } from "vitest";
 import { Camera } from "../src/camera";
 import { createCanvas } from "@napi-rs/canvas";
-import { drawBar, splitBarFrame } from "../src/bar";
+import { BarTracker, drawBar, splitBarFrame } from "../src/bar";
 import { Collector, splitFrames } from "../src/protocol";
 
 afterEach(() => vi.unstubAllGlobals());
 function setup() {
   const stop = vi.fn();
-  const track = { stop, addEventListener: vi.fn() };
-  const stream = { getTracks: () => [track] } as unknown as MediaStream;
+  const track = {
+    stop,
+    addEventListener: vi.fn(),
+    getCapabilities: vi.fn().mockReturnValue({}),
+    applyConstraints: vi.fn().mockResolvedValue(undefined),
+  };
+  const stream = {
+    getTracks: () => [track],
+    getVideoTracks: () => [track],
+  } as unknown as MediaStream;
   const getUserMedia = vi.fn().mockResolvedValue(stream);
   vi.stubGlobal("isSecureContext", true);
   vi.stubGlobal("navigator", { mediaDevices: { getUserMedia } });
@@ -26,7 +34,7 @@ function setup() {
     pause: vi.fn(),
     srcObject: null,
   } as unknown as HTMLVideoElement;
-  return { stream, stop, getUserMedia, video };
+  return { stream, stop, getUserMedia, video, track };
 }
 it("stops a stream granted after cancellation, without attaching it", async () => {
   const { stream, stop, getUserMedia, video } = setup();
@@ -274,4 +282,65 @@ it("Camera restores 1k from degraded optical pixels with two data frames missing
   expect(collector.count).toBe(collector.total);
   camera.stop();
   frames.clear();
+});
+
+it("Camera.stop clears the Bar reference frame and scan counters", async () => {
+  const { video } = setup();
+  const clear = vi.spyOn(BarTracker.prototype, "clear");
+  try {
+    const camera = new Camera();
+    await camera.start(video, "environment", vi.fn(), vi.fn());
+    clear.mockClear();
+    camera.stop();
+    expect(clear).toHaveBeenCalledOnce();
+  } finally {
+    clear.mockRestore();
+  }
+});
+
+it("enables only supported continuous camera controls", async () => {
+  const { video, track, getUserMedia } = setup();
+  track.getCapabilities.mockReturnValue({
+    focusMode: ["manual", "continuous"],
+    exposureMode: ["continuous"],
+    whiteBalanceMode: ["manual"],
+  });
+  const camera = new Camera();
+  await camera.start(video, "environment", vi.fn(), vi.fn());
+  expect(track.applyConstraints).toHaveBeenCalledWith({
+    advanced: [{ focusMode: "continuous", exposureMode: "continuous" }],
+  });
+  expect(getUserMedia.mock.calls[0][0].video.frameRate).toEqual({ ideal: 30 });
+  camera.stop();
+});
+it("camera remains usable when optional automatic controls are rejected", async () => {
+  const { video, track } = setup();
+  track.getCapabilities.mockReturnValue({ focusMode: ["continuous"] });
+  track.applyConstraints.mockRejectedValue(
+    new DOMException("Unsupported", "OverconstrainedError"),
+  );
+  const camera = new Camera();
+  expect(await camera.start(video, "environment", vi.fn(), vi.fn())).toBe(true);
+  expect(track.applyConstraints).toHaveBeenCalledOnce();
+  camera.stop();
+});
+it("cancellation during automatic camera setup cannot restart playback", async () => {
+  const { video, track, stop } = setup();
+  track.getCapabilities.mockReturnValue({ focusMode: ["continuous"] });
+  let finish!: () => void;
+  track.applyConstraints.mockImplementation(
+    () =>
+      new Promise<void>((resolve) => {
+        finish = resolve;
+      }),
+  );
+  const camera = new Camera();
+  const started = camera.start(video, "environment", vi.fn(), vi.fn());
+  await Promise.resolve();
+  expect(track.applyConstraints).toHaveBeenCalledOnce();
+  camera.stop();
+  finish();
+  expect(await started).toBe(false);
+  expect(stop).toHaveBeenCalledOnce();
+  expect(video.play).not.toHaveBeenCalled();
 });

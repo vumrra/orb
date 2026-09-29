@@ -164,85 +164,38 @@ export function drawBar(
       (top + bottom) * height,
     );
   }
+  // Fixed reference dots stay outside every animated endpoint and inside the canvas.
+  const radius = width / 100;
+  for (const x of [-0.5, 0.5])
+    for (const y of [-0.56, 0.56]) {
+      ctx.beginPath();
+      ctx.arc(cx + x * width, cy + y * height, radius, 0, Math.PI * 2);
+      ctx.fill();
+    }
 }
 
-export function scanBarPixels({ width, height, data }: Pixels): {
+type Scan = {
   candidate: boolean;
   symbol: Uint8Array | null;
-} {
-  const empty = { candidate: false, symbol: null };
-  if (
-    width < 80 ||
-    height < 80 ||
-    width > 1024 ||
-    height > 1024 ||
-    data.length !== width * height * 4
-  )
-    return empty;
-  const mask = new Uint8Array(width * height),
-    queue = new Int32Array(mask.length);
-  for (let i = 0; i < mask.length; i++)
-    mask[i] = data[i * 4] + 2 * data[i * 4 + 1] + data[i * 4 + 2] > 512 ? 1 : 0;
-  const rails: (Point & { dx: number; dy: number; length: number })[] = [];
-  // Connected luminance runs give orientation without a center crop or color markers.
-  for (let i = 0; i < mask.length; i++) {
-    if (!mask[i]) continue;
-    let head = 0,
-      tail = 1,
-      sx = 0,
-      sy = 0,
-      sxx = 0,
-      syy = 0,
-      sxy = 0;
-    queue[0] = i;
-    mask[i] = 0;
-    while (head < tail) {
-      const n = queue[head++],
-        x = (n % width) + 0.5,
-        y = Math.floor(n / width) + 0.5;
-      sx += x;
-      sy += y;
-      sxx += x * x;
-      syy += y * y;
-      sxy += x * y;
-      // Avoid allocating a neighbor array for every bright pixel.
-      for (let j = 0; j < 4; j++) {
-        const q =
-          j === 0 ? n - 1 : j === 1 ? n + 1 : j === 2 ? n - width : n + width;
-        if (
-          q < 0 ||
-          q >= mask.length ||
-          (j < 2 && Math.floor(q / width) !== Math.floor(n / width)) ||
-          !mask[q]
-        )
-          continue;
-        mask[q] = 0;
-        queue[tail++] = q;
-      }
-    }
-    if (tail < 80 || tail > 40000) continue;
-    const x = sx / tail,
-      y = sy / tail,
-      xx = sxx / tail - x * x,
-      yy = syy / tail - y * y,
-      xy = sxy / tail - x * y;
-    const angle = 0.5 * Math.atan2(2 * xy, xx - yy),
-      dx = Math.cos(angle),
-      dy = Math.sin(angle);
-    const major = xx * dx * dx + 2 * xy * dx * dy + yy * dy * dy,
-      minor = xx + yy - major;
-    const length = Math.sqrt(12 * major),
-      thick = Math.sqrt(Math.max(0, 12 * minor));
-    if (length >= 70 && thick >= 1.5 && length > thick * 9)
-      rails.push({ x, y, dx, dy, length });
-    if (rails.length > 256) return empty;
-  }
-  rails.sort((a, b) => b.length - a.length);
-  // Largest 16 possible rails, at most 24 plausible pairs; noisy scenes stay bounded.
-  const top = rails.slice(0, 16);
-  let candidate = false,
-    attempts = 0;
-  function light(x: number, y: number) {
+  corners?: Point[];
+};
+function usable({ width, height, data }: Pixels) {
+  return (
+    width >= 80 &&
+    height >= 80 &&
+    width <= 1024 &&
+    height <= 1024 &&
+    data.length === width * height * 4
+  );
+}
+function luminance(p: Pixels, x: number, y: number) {
+  const i = (y * p.width + x) * 4;
+  return (p.data[i] + 2 * p.data[i + 1] + p.data[i + 2]) / 4;
+}
+function decode(pixels: Pixels, corners: Point[]): Scan {
+  const { width, height } = pixels;
+  let candidate = false;
+  const light = (x: number, y: number) => {
     x -= 0.5;
     y -= 0.5;
     const ix = Math.floor(x),
@@ -250,122 +203,281 @@ export function scanBarPixels({ width, height, data }: Pixels): {
       fx = x - ix,
       fy = y - iy;
     if (ix < 0 || iy < 0 || ix + 1 >= width || iy + 1 >= height) return 0;
-    const at = (px: number, py: number) => {
-      const i = (py * width + px) * 4;
-      return (data[i] + 2 * data[i + 1] + data[i + 2]) / 4;
-    };
     return (
-      at(ix, iy) * (1 - fx) * (1 - fy) +
-      at(ix + 1, iy) * fx * (1 - fy) +
-      at(ix, iy + 1) * (1 - fx) * fy +
-      at(ix + 1, iy + 1) * fx * fy
+      luminance(pixels, ix, iy) * (1 - fx) * (1 - fy) +
+      luminance(pixels, ix + 1, iy) * fx * (1 - fy) +
+      luminance(pixels, ix, iy + 1) * (1 - fx) * fy +
+      luminance(pixels, ix + 1, iy + 1) * fx * fy
     );
+  };
+  const [p0, p1, p2, p3] = corners;
+  const dx = p0.x - p1.x + p2.x - p3.x,
+    dy = p0.y - p1.y + p2.y - p3.y;
+  const ax = p1.x - p2.x,
+    bx = p3.x - p2.x,
+    ay = p1.y - p2.y,
+    by = p3.y - p2.y,
+    det = ax * by - bx * ay;
+  if (Math.abs(det) < 1) return { candidate: false, symbol: null };
+  const g = (dx * by - bx * dy) / det,
+    h = (ax * dy - dx * ay) / det;
+  const project = (u: number, v: number) => {
+    const d = 1 + g * u + h * v;
+    return {
+      x:
+        (p0.x + (p1.x - p0.x + g * p1.x) * u + (p3.x - p0.x + h * p3.x) * v) /
+        d,
+      y:
+        (p0.y + (p1.y - p0.y + g * p1.y) * u + (p3.y - p0.y + h * p3.y) * v) /
+        d,
+    };
+  };
+  const sample = (u: number, v: number) => {
+    const p = project(u, v);
+    return light(p.x, p.y);
+  };
+
+  // Exposure is local to the carrier, so bright background objects cannot set it.
+  let white = 0,
+    black = 0;
+  for (let i = 1; i <= 30; i++) {
+    white += sample(i / 31, 0.5);
+    black += sample((i - 0.5) / 31, 0.5);
   }
-  function ends(r: (typeof top)[number], flip = false) {
-    const dx = r.dx * (flip ? -1 : 1),
-      dy = r.dy * (flip ? -1 : 1);
-    return [-1, 1].map((sign) => {
+  white /= 30;
+  black /= 30;
+  if (white - black < 25) return { candidate: false, symbol: null };
+  const threshold = (white + black) / 2;
+  let aligned = true;
+  for (let i = 1; i <= 30; i++) {
+    if (
+      sample(i / 31, 0.5) < threshold ||
+      sample((i - 0.5) / 31, 0.5) > threshold
+    ) {
+      aligned = false;
+      break;
+    }
+  }
+  if (!aligned) return { candidate, symbol: null };
+  candidate = true;
+  const levels: number[] = [];
+  for (let i = 1; i <= 30 && aligned; i++)
+    for (const sign of [-1, 1]) {
       let lo = 0,
-        hi = r.length * 0.65;
-      for (let k = 0; k < 12; k++) {
+        hi = 0.49;
+      for (let k = 0; k < 10; k++) {
         const m = (lo + hi) / 2;
-        if (light(r.x + dx * m * sign, r.y + dy * m * sign) > 128) lo = m;
+        if (sample(i / 31, 0.5 + (sign * m) / 1.12) > threshold) lo = m;
         else hi = m;
       }
-      const distance = ((lo + hi) / 2) * sign;
-      return { x: r.x + dx * distance, y: r.y + dy * distance };
-    });
-  }
-  for (let a = 0; a < top.length; a++)
-    for (let b = a + 1; b < top.length; b++) {
-      const l = top[a],
-        r = top[b],
-        dot = l.dx * r.dx + l.dy * r.dy;
-      const separation = Math.abs((r.x - l.x) * l.dy - (r.y - l.y) * l.dx);
-      if (
-        Math.abs(dot) < 0.97 ||
-        l.length / r.length > 1.35 ||
-        separation < 180 ||
-        separation < l.length * 0.6 ||
-        separation > l.length * 2
-      )
-        continue;
-      if (++attempts > 24) return { candidate, symbol: null };
-      const [p0, p3] = ends(l),
-        [p1, p2] = ends(r, dot < 0);
-      const dx = p0.x - p1.x + p2.x - p3.x,
-        dy = p0.y - p1.y + p2.y - p3.y;
-      const ax = p1.x - p2.x,
-        bx = p3.x - p2.x,
-        ay = p1.y - p2.y,
-        by = p3.y - p2.y,
-        det = ax * by - bx * ay;
-      if (Math.abs(det) < 1) continue;
-      const g = (dx * by - bx * dy) / det,
-        h = (ax * dy - dx * ay) / det;
-      const project = (u: number, v: number) => {
-        const d = 1 + g * u + h * v;
-        return {
-          x:
-            (p0.x +
-              (p1.x - p0.x + g * p1.x) * u +
-              (p3.x - p0.x + h * p3.x) * v) /
-            d,
-          y:
-            (p0.y +
-              (p1.y - p0.y + g * p1.y) * u +
-              (p3.y - p0.y + h * p3.y) * v) /
-            d,
-        };
-      };
-      const sample = (u: number, v: number) => {
-        const p = project(u, v);
-        return light(p.x, p.y);
-      };
-      let aligned = true;
-      for (let i = 1; i <= 30; i++) {
-        if (sample(i / 31, 0.5) < 160 || sample((i - 0.5) / 31, 0.5) > 100) {
-          aligned = false;
-          break;
+      const value = ((lo + hi) / 2 - BASE) / STEP,
+        nearest = Math.round(value);
+      if (nearest < 0 || nearest > 7 || Math.abs(value - nearest) > 0.3) {
+        aligned = false;
+        break;
+      }
+      levels.push(nearest);
+    }
+  if (!aligned) return { candidate, symbol: null };
+  for (const reverse of [false, true])
+    for (const flip of [false, true]) {
+      const symbol = new Uint8Array(SYMBOL_BYTES);
+      for (let i = 0; i < 60; i++) {
+        const bar = reverse ? 29 - (i >> 1) : i >> 1,
+          side = (i & 1) ^ (flip ? 1 : 0);
+        const value = levels[bar * 2 + side];
+        for (let j = 0; j < 3; j++) {
+          const bit = ((i * 3 + j) * 53) % 180;
+          symbol[bit >> 3] |= ((value >> j) & 1) << (bit & 7);
         }
       }
-      if (!aligned) continue;
-      candidate = true;
-      const levels: number[] = [];
-      for (let i = 1; i <= 30 && aligned; i++)
-        for (const sign of [-1, 1]) {
-          let lo = 0,
-            hi = 0.49;
-          for (let k = 0; k < 10; k++) {
-            const m = (lo + hi) / 2;
-            if (sample(i / 31, 0.5 + sign * m) > 128) lo = m;
-            else hi = m;
-          }
-          const value = ((lo + hi) / 2 - BASE) / STEP,
-            nearest = Math.round(value);
-          if (nearest < 0 || nearest > 7 || Math.abs(value - nearest) > 0.3) {
-            aligned = false;
-            break;
-          }
-          levels.push(nearest);
-        }
-      if (!aligned) continue;
-      for (const reverse of [false, true])
-        for (const flip of [false, true]) {
-          const symbol = new Uint8Array(SYMBOL_BYTES);
-          for (let i = 0; i < 60; i++) {
-            const bar = reverse ? 29 - (i >> 1) : i >> 1,
-              side = (i & 1) ^ (flip ? 1 : 0);
-            const value = levels[bar * 2 + side];
-            for (let j = 0; j < 3; j++) {
-              const bit = ((i * 3 + j) * 53) % 180;
-              symbol[bit >> 3] |= ((value >> j) & 1) << (bit & 7);
-            }
-          }
-          const original = mix(symbol, true);
-          if (validSymbol(original))
-            return { candidate: true, symbol: original };
-        }
+      const original = mix(symbol, true);
+      if (validSymbol(original))
+        return { candidate: true, symbol: original, corners };
     }
   return { candidate, symbol: null };
+}
+function acquire(p: Pixels): Scan {
+  const { width, height } = p,
+    size = width * height;
+  // The modal background plus a small contrast floor also finds dim white dots.
+  const histogram = new Uint32Array(256);
+  for (let i = 0; i < size; i += 4)
+    histogram[Math.round(luminance(p, i % width, Math.floor(i / width)))]++;
+  let bg = 0;
+  for (let i = 1; i < 256; i++) if (histogram[i] > histogram[bg]) bg = i;
+  const threshold = bg + 25,
+    mask = new Uint8Array(size),
+    queue = new Int32Array(size);
+  for (let i = 0; i < size; i++)
+    mask[i] =
+      luminance(p, i % width, Math.floor(i / width)) > threshold ? 1 : 0;
+  const dots: Point[] = [];
+  for (let i = 0; i < size; i++) {
+    if (!mask[i]) continue;
+    let head = 0,
+      tail = 1,
+      sx = 0,
+      sy = 0,
+      minX = width,
+      maxX = 0,
+      minY = height,
+      maxY = 0;
+    queue[0] = i;
+    mask[i] = 0;
+    while (head < tail) {
+      const n = queue[head++],
+        x = n % width,
+        y = Math.floor(n / width);
+      sx += x + 0.5;
+      sy += y + 0.5;
+      minX = Math.min(minX, x);
+      maxX = Math.max(maxX, x);
+      minY = Math.min(minY, y);
+      maxY = Math.max(maxY, y);
+      for (let j = 0; j < 4; j++) {
+        const q =
+          j === 0 ? n - 1 : j === 1 ? n + 1 : j === 2 ? n - width : n + width;
+        if (
+          q < 0 ||
+          q >= size ||
+          (j < 2 && Math.floor(q / width) !== y) ||
+          !mask[q]
+        )
+          continue;
+        mask[q] = 0;
+        queue[tail++] = q;
+      }
+    }
+    const w = maxX - minX + 1,
+      h = maxY - minY + 1;
+    if (
+      tail >= 7 &&
+      tail <= 600 &&
+      w / h > 0.5 &&
+      w / h < 2 &&
+      tail / (w * h) > 0.45
+    )
+      dots.push({ x: sx / tail, y: sy / tail });
+    if (dots.length > 32) return { candidate: false, symbol: null };
+  }
+  let attempts = 0,
+    candidate = false;
+  for (let a = 0; a < dots.length; a++)
+    for (let b = a + 1; b < dots.length; b++)
+      for (let c = b + 1; c < dots.length; c++)
+        for (let d = c + 1; d < dots.length; d++) {
+          const corners = [dots[a], dots[b], dots[c], dots[d]],
+            cx = corners.reduce((s, p) => s + p.x, 0) / 4,
+            cy = corners.reduce((s, p) => s + p.y, 0) / 4;
+          corners.sort(
+            (a, b) =>
+              Math.atan2(a.y - cy, a.x - cx) - Math.atan2(b.y - cy, b.x - cx),
+          );
+          const lengths = corners.map((p, i) =>
+            Math.hypot(
+              p.x - corners[(i + 1) % 4].x,
+              p.y - corners[(i + 1) % 4].y,
+            ),
+          );
+          if (
+            Math.min(...lengths) < 100 ||
+            Math.max(...lengths) / Math.min(...lengths) > 2.4 ||
+            Math.abs(lengths[0] / lengths[2] - 1) > 0.35 ||
+            Math.abs(lengths[1] / lengths[3] - 1) > 0.35
+          )
+            continue;
+          if (++attempts > 24) return { candidate, symbol: null };
+          for (let turn = 0; turn < 2; turn++) {
+            const result = decode(p, corners);
+            candidate ||= result.candidate;
+            if (result.symbol) return result;
+            corners.push(corners.shift()!);
+          }
+        }
+  return { candidate, symbol: null };
+}
+export function scanBarPixels(pixels: Pixels): Scan {
+  return usable(pixels) ? acquire(pixels) : { candidate: false, symbol: null };
+}
+export class BarTracker {
+  private corners: Point[] | null = null;
+  private width = 0;
+  private height = 0;
+  private missed = 0;
+  readonly stats = { fullScans: 0, trackedScans: 0 };
+  clear() {
+    this.corners = null;
+    this.width = 0;
+    this.height = 0;
+    this.missed = 0;
+    this.stats.fullScans = 0;
+    this.stats.trackedScans = 0;
+  }
+  scan(p: Pixels): Scan {
+    if (!usable(p)) {
+      this.clear();
+      return { candidate: false, symbol: null };
+    }
+    if (p.width !== this.width || p.height !== this.height) this.clear();
+    this.width = p.width;
+    this.height = p.height;
+    if (this.corners) {
+      this.stats.trackedScans++;
+      // Four bounded windows follow modest motion; a failed CRC triggers reacquisition.
+      const moved = this.corners.map((point) => {
+        const radius = 10;
+        let low = 255,
+          high = 0;
+        for (let y = Math.floor(point.y) - radius; y <= point.y + radius; y++)
+          for (
+            let x = Math.floor(point.x) - radius;
+            x <= point.x + radius;
+            x++
+          ) {
+            if (x < 0 || y < 0 || x >= p.width || y >= p.height) continue;
+            const v = luminance(p, x, y);
+            low = Math.min(low, v);
+            high = Math.max(high, v);
+          }
+        let sx = 0,
+          sy = 0,
+          total = 0;
+        for (let y = Math.floor(point.y) - radius; y <= point.y + radius; y++)
+          for (
+            let x = Math.floor(point.x) - radius;
+            x <= point.x + radius;
+            x++
+          ) {
+            if (x < 0 || y < 0 || x >= p.width || y >= p.height) continue;
+            const v = Math.max(0, luminance(p, x, y) - (low + high) / 2);
+            sx += (x + 0.5) * v;
+            sy += (y + 0.5) * v;
+            total += v;
+          }
+        return total ? { x: sx / total, y: sy / total } : point;
+      });
+      const result = decode(p, moved);
+      if (result.symbol) {
+        this.corners = moved;
+        this.missed = 0;
+        return result;
+      }
+      if (result.candidate && this.missed++ < 2) {
+        this.corners = moved;
+        return result;
+      }
+      this.corners = null;
+      this.missed = 0;
+    }
+    // During loss, scan the whole FOV once every four calls, never a center crop.
+    if (this.missed++ % 4 !== 0) return { candidate: false, symbol: null };
+    this.stats.fullScans++;
+    const result = acquire(p);
+    if (result.corners) {
+      this.corners = result.corners;
+      this.missed = 0;
+    }
+    return result;
+  }
 }

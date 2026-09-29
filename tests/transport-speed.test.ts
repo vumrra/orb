@@ -6,7 +6,7 @@ import {
   BAR_TRANSITION_MS,
   BarCollector,
   drawBar,
-  scanBarPixels,
+  BarTracker,
   splitBarFrame,
 } from "../src/bar";
 import { Collector, splitFrames } from "../src/protocol";
@@ -20,6 +20,7 @@ it.each([0, 17, 32])(
     });
     const symbols = splitFrames(bytes).flatMap(splitBarFrame),
       fragments = new BarCollector(),
+      tracker = new BarTracker(),
       collector = new Collector();
     const c = createCanvas(480, 400),
       ctx = c.getContext("2d");
@@ -44,7 +45,7 @@ it.each([0, 17, 32])(
         symbols[(index + symbols.length - 1) % symbols.length],
         blend,
       );
-      const scan = scanBarPixels(ctx.getImageData(0, 0, 480, 400));
+      const scan = tracker.scan(ctx.getImageData(0, 0, 480, 400));
       if (scan.symbol) {
         const frame = fragments.add(scan.symbol);
         if (frame) packet = collector.add(frame);
@@ -55,6 +56,8 @@ it.each([0, 17, 32])(
     expect(BAR_COUNT).toBeLessThan(34);
     expect(packet).toEqual(bytes);
     expect(completed).toBeLessThan(10000);
+    expect(tracker.stats.trackedScans).toBeGreaterThan(20);
+    expect(tracker.stats.fullScans).toBeLessThan(10);
     console.log(
       JSON.stringify({
         bar30fpsMs: completed,

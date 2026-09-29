@@ -7,6 +7,8 @@ const sound = async (page) => {
 // This is a real AudioBuffer -> PCM -> microphone path, with zero external output.
 async function silentWire(page) {
   await page.addInitScript(() => {
+    // Exercise uncompressed payload throughput, independent of browser compression.
+    window.CompressionStream = undefined;
     const Native = window.AudioContext;
     window.__contexts = [];
     window.__streams = [];
@@ -75,20 +77,20 @@ for (const reduced of [false, true])
       return String.fromCharCode(32 + ((seed >>> 24) % 95));
     }).join("");
     await sender.getByLabel("Your message").fill(message);
-    await sender.getByRole("button", { name: "Create sound" }).click();
     const began = Date.now();
+    await sender.getByRole("button", { name: "Create sound" }).click();
     await receiver.getByRole("button", { name: "Start microphone" }).click();
     await page.waitForTimeout(300);
     await sender.screenshot({ path: `/tmp/orb-sound-active-${reduced}.png` });
     await expect(
       receiver.getByRole("heading", { name: "Message received" }),
-      // Narrower/lower carriers require 16ms symbols: 21.253s nominal PCM.
-    ).toBeVisible({ timeout: 30000 });
+      // Dense protected bursts retain the quiet low-band modulation.
+    ).toBeVisible({ timeout: 10000 });
     const elapsed = Date.now() - began;
     await expect(
       receiver.getByLabel("Received message", { exact: true }),
     ).toHaveText(message);
-    expect(elapsed).toBeLessThan(30000);
+    expect(elapsed).toBeLessThan(10000);
     await expect(receiver.getByRole("progressbar")).toHaveAttribute(
       "aria-valuenow",
       "100",

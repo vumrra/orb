@@ -1,9 +1,10 @@
 import { OpticalTracker } from "./optical";
 import { OpticalRecovery } from "./optical-fec";
-import { BarCollector, scanBarPixels } from "./bar";
+import { BarCollector, BarTracker } from "./bar";
 export class Camera {
   private generation = 0;
   private fragments = new BarCollector();
+  private bar = new BarTracker();
   private optical = new OpticalTracker();
   private recovery = new OpticalRecovery();
   private detected: "orb" | "bar" | null = null;
@@ -14,6 +15,7 @@ export class Camera {
   stop() {
     this.generation++;
     this.fragments.clear();
+    this.bar.clear();
     this.optical.clear();
     this.recovery.clear();
     this.detected = null;
@@ -53,6 +55,7 @@ export class Camera {
         facingMode: { ideal: facing },
         width: { ideal: 1280 },
         height: { ideal: 1280 },
+        frameRate: { ideal: 30 },
       },
     });
     if (generation !== this.generation) {
@@ -63,6 +66,23 @@ export class Camera {
     this.video = video;
     video.srcObject = stream;
     try {
+      // 지원되는 기기만 자동 초점·노출을 설정하고, 미지원 시 기본 촬영을 유지합니다.
+      const track = stream.getVideoTracks?.()[0];
+      try {
+        const capabilities = track?.getCapabilities?.() as
+          (MediaTrackCapabilities & Record<string, unknown>) | undefined;
+        const automatic: Record<string, string> = {};
+        for (const key of ["focusMode", "exposureMode", "whiteBalanceMode"]) {
+          const modes = capabilities?.[key];
+          if (Array.isArray(modes) && modes.includes("continuous"))
+            automatic[key] = "continuous";
+        }
+        if (track && Object.keys(automatic).length)
+          await track.applyConstraints({ advanced: [automatic] });
+      } catch {
+        // Optional device controls must not block an otherwise usable stream.
+      }
+      if (generation !== this.generation) return false;
       await video.play();
       if (generation !== this.generation) return false;
       const canvas = document.createElement("canvas");
@@ -125,7 +145,7 @@ export class Camera {
             const opticalFirst = this.detected === "orb";
             if (opticalFirst) result = this.optical.scan(pixels, markCandidate);
             if (!result.frame) {
-              const bar = scanBarPixels(pixels);
+              const bar = this.bar.scan(pixels);
               if (bar.candidate) markCandidate();
               if (bar.symbol) {
                 this.detected = "bar";

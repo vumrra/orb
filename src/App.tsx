@@ -38,6 +38,32 @@ export function ReceivedText({ text }: { text: string }) {
   );
 }
 
+function CameraIcon({ front = false }: { front?: boolean }) {
+  return (
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.3"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M8 5 9.5 3h5L16 5h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2Z" />
+      {front ? (
+        <>
+          <circle cx="12" cy="10" r="2.2" />
+          <path d="M7.5 17a4.5 4.5 0 0 1 9 0" />
+        </>
+      ) : (
+        <circle cx="12" cy="13" r="4" />
+      )}
+    </svg>
+  );
+}
+
 type Mode = "send" | "receive";
 type Phase =
   | "idle"
@@ -455,7 +481,8 @@ export function App() {
         </nav>
         <div className="light-stage">
           <div
-            className={`orb-stage ${inCamera ? "camera-active" : ""} ${inCamera && candidate ? "is-candidate" : ""} ${phase === "received" ? "is-received" : ""}`}
+            className={`orb-stage ${mode === "receive" && transport !== "sound" && phase !== "received" ? "camera-shell" : ""} ${inCamera ? "camera-active" : ""} ${inCamera && candidate ? "is-candidate" : ""} ${phase === "received" ? "is-received" : ""}`}
+            data-camera-state={phase}
           >
             <Orb
               frames={frames}
@@ -474,18 +501,21 @@ export function App() {
             />
             {mode === "receive" &&
               transport !== "sound" &&
-              phase !== "received" && (
-                <div className="reticle" aria-hidden="true">
-                  <i />
-                  <i />
-                  <i />
-                  <i />
-                  <span className="target-label">
-                    {candidate ? "Signal acquired" : ""}
-                  </span>
+              (phase === "idle" || phase === "requesting") && (
+                <div className="camera-ready" aria-hidden="true">
+                  <CameraIcon front={facing === "user"} />
                 </div>
               )}
-            {(inCamera || (transport === "sound" && phase === "scanning")) && (
+            {mode === "receive" &&
+              transport !== "sound" &&
+              phase !== "received" && (
+                <div className="reticle" aria-hidden="true">
+                  {candidate && (
+                    <span className="target-label">Signal acquired</span>
+                  )}
+                </div>
+              )}
+            {phase === "scanning" && (
               <span className="camera-indicator">
                 <span />
                 {transport === "sound" ? "Microphone on" : "Camera on"}
@@ -623,18 +653,25 @@ export function App() {
               {mode === "receive" &&
                 transport !== "sound" &&
                 phase === "idle" && (
-                  <div className="camera-choice">
-                    <label htmlFor="camera-facing">Camera</label>
-                    <select
-                      id="camera-facing"
-                      value={facing}
-                      onChange={(event) =>
-                        setFacing(event.target.value as "environment" | "user")
-                      }
+                  <div
+                    className="camera-choice"
+                    role="group"
+                    aria-label="Camera"
+                  >
+                    <button
+                      type="button"
+                      aria-pressed={facing === "environment"}
+                      onClick={() => setFacing("environment")}
                     >
-                      <option value="environment">Back / default</option>
-                      <option value="user">Front / webcam</option>
-                    </select>
+                      <CameraIcon /> Back camera
+                    </button>
+                    <button
+                      type="button"
+                      aria-pressed={facing === "user"}
+                      onClick={() => setFacing("user")}
+                    >
+                      <CameraIcon front /> Front camera
+                    </button>
                   </div>
                 )}
               <Primary
@@ -659,7 +696,12 @@ export function App() {
                     : transport === "sound"
                       ? "Start microphone"
                       : "Start camera"}
-                {!locked && <Arrow down={mode === "receive"} />}
+                {!locked &&
+                  (mode === "receive" && transport !== "sound" ? (
+                    <CameraIcon />
+                  ) : (
+                    <Arrow down={mode === "receive"} />
+                  ))}
               </Primary>
               {locked && (
                 <button className="quiet-button" onClick={() => reset()}>

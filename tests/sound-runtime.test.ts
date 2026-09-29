@@ -128,10 +128,21 @@ it("schedules bounded real PCM lazily, and cancels every output on interruption"
     expect(gain.gain.value).toBe(0.15);
     expect("setVolume" in sound).toBe(false);
     expect(get.mock.calls.length).toBeGreaterThan(0);
-    expect(get.mock.calls.length).toBeLessThanOrEqual(3);
+    expect(get.mock.calls.length).toBeLessThanOrEqual(22);
     expect(
       nodes.every((n) => n.buffer!.getChannelData(0).some((x) => x !== 0)),
     ).toBe(true);
+    const { SoundDecoder } = await import("../src/sound");
+    const { parseFrame } = await import("../src/protocol");
+    const indices: number[] = [];
+    const decoder = new SoundDecoder(48000, (frame) => {
+      const parsed = parseFrame(frame)!;
+      indices.push(parsed.index);
+      parsed.chunk.fill(0);
+    });
+    decoder.push(nodes[0].buffer!.getChannelData(0));
+    expect(indices).toEqual(Array.from({ length: 22 }, (_, i) => i));
+    decoder.clear();
     const mutable = context as typeof context & {
       currentTime: number;
       onstatechange: () => void;
