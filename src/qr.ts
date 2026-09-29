@@ -144,22 +144,24 @@ export function drawQr(
   matrix: QrMatrix | null,
   size: number,
 ) {
+  ctx.clearRect(0, 0, size, size);
+  if (!matrix) {
+    // 대기 화면은 기존 배경 위에 작은 은색 선만 표시합니다.
+    const unit = size / 34;
+    const offset = (size - unit * 10) / 2;
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "#90969e";
+    for (const [x, y] of [
+      [0, 0],
+      [6, 0],
+      [0, 6],
+    ])
+      ctx.strokeRect(offset + x * unit, offset + y * unit, 4 * unit, 4 * unit);
+    return;
+  }
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, size, size);
   ctx.fillStyle = "#000";
-  if (!matrix) {
-    // Finder outlines only: idle never encodes a message.
-    const unit = Math.max(1, Math.floor(size / 18));
-    ctx.lineWidth = unit;
-    ctx.strokeStyle = "#60656b";
-    for (const [x, y] of [
-      [5, 5],
-      [11, 5],
-      [5, 11],
-    ])
-      ctx.strokeRect(x * unit, y * unit, 3 * unit, 3 * unit);
-    return;
-  }
   const unit = Math.floor(size / (matrix.size + 8)),
     offset = Math.floor((size - matrix.size * unit) / 2);
   for (let y = 0; y < matrix.size; y++)

@@ -479,9 +479,7 @@ export function App() {
           <span>{theme === "dark" ? "Light" : "Dark"}</span>
         </button>
       </header>
-      <main
-        className={`main ${transport === "qr" && mode === "send" ? "qr-send" : ""}`}
-      >
+      <main className="main">
         <nav className="mode-switch" aria-label="Transfer mode">
           <button
             aria-pressed={mode === "send"}

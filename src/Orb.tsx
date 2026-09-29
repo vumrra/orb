@@ -281,6 +281,7 @@ function QrCanvas({ frames }: { frames: FrameSource }) {
     <canvas
       ref={canvas}
       className="orb-canvas qr-canvas"
+      data-transmitting={frames.length > 0}
       role="img"
       aria-label={
         frames.length ? "QR code carrying the message" : "QR finder outlines"

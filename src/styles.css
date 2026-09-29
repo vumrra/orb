@@ -847,19 +847,15 @@ footer summary span {
   color: #171b21;
 }
 
-/* QR density follows the visible CSS area; the camera keeps its circular shell. */
-.main.qr-send {
-  width: min(100% - 40px, 600px);
-}
-.qr-send .light-stage {
-  --orb-size: min(600px, calc(100vw - 40px));
-}
-.qr-send .controls,
-.qr-send .intro {
-  width: min(100%, 400px);
-}
+/* 기존 stage 규격을 유지하고 QR 흰 여백 바깥쪽만 둥글게 처리합니다. */
 .qr-canvas {
   image-rendering: pixelated;
+}
+.qr-canvas[data-transmitting="true"] {
+  border-radius: 20px;
+}
+[data-theme="light"][data-transport="qr"] .wordmark {
+  color: #171b20;
 }
 [data-theme="light"][data-transport="qr"] .orb-stage:not(.camera-shell) {
   background: none;
