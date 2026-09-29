@@ -1,15 +1,25 @@
 import { describe, it, expect } from "vitest";
-import { splitFrames, parseFrame, Collector, crc32 } from "../src/protocol";
+import {
+  splitFrames,
+  parseFrame,
+  Collector,
+  crc32,
+  FRAME_BYTES,
+  CHUNK_BYTES,
+} from "../src/protocol";
 
 const bytes = (text: string) => new TextEncoder().encode(text);
 function reseal(frame: Uint8Array) {
-  new DataView(frame.buffer).setUint32(60, crc32(frame.subarray(0, 60)));
+  new DataView(frame.buffer).setUint32(
+    FRAME_BYTES - 4,
+    crc32(frame.subarray(0, FRAME_BYTES - 4)),
+  );
   return frame;
 }
-describe("plaintext optical v2", () => {
+describe("plaintext particle optical v3", () => {
   it("carries plain UTF-8 in an incompatible version with fresh transfer IDs", () => {
     const [frame] = splitFrames(bytes("hello"));
-    expect(frame[2]).toBe(2);
+    expect(frame[2]).toBe(3);
     expect(parseFrame(frame)?.chunk).toEqual(bytes("hello"));
     expect(splitFrames(bytes("hello"))[0].slice(6, 14)).not.toEqual(
       frame.slice(6, 14),
@@ -19,19 +29,19 @@ describe("plaintext optical v2", () => {
     expect(parseFrame(reseal(old))).toBeNull();
   });
   it("exposes only contiguous UTF-8 with split emoji, Korean and a literal BOM", () => {
-    const text = "\uFEFF" + "a".repeat(36) + "🌒한글" + "z".repeat(90);
+    const text = "\uFEFF" + "a".repeat(12) + "🌒한글" + "z".repeat(30);
     const frames = splitFrames(bytes(text));
     const collector = new Collector();
     expect(collector.add(frames[2])).toBeNull();
     expect(collector.prefix).toBe("");
     collector.add(frames[0]);
-    expect(collector.prefix).toBe("\uFEFF" + "a".repeat(36));
+    expect(collector.prefix).toBe("\uFEFF" + "a".repeat(12));
     collector.add(frames[0]);
     expect(collector.count).toBe(2);
     collector.add(frames[1]);
     expect(collector.prefix).toBe(
       new TextDecoder("utf-8", { ignoreBOM: true }).decode(
-        bytes(text).slice(0, 120),
+        bytes(text).slice(0, 48),
       ),
     );
     const packet = collector.add(frames[3]);
@@ -48,16 +58,16 @@ describe("plaintext optical v2", () => {
     const frames = splitFrames(bytes("가".repeat(40)));
     const collector = new Collector();
     collector.add(frames[0]);
-    expect(collector.prefix).toBe("가".repeat(13));
+    expect(collector.prefix).toBe("가".repeat(5));
     collector.add(frames[1]);
-    expect(collector.prefix).toBe("가".repeat(26));
-    collector.add(frames[2]);
+    expect(collector.prefix).toBe("가".repeat(10));
+    for (const frame of frames.slice(2)) collector.add(frame);
     expect(collector.prefix).toBe("가".repeat(40));
   });
   it("rejects empty/oversized payloads and accepts the byte cap", () => {
     expect(() => splitFrames(bytes(""))).toThrow();
     expect(() => splitFrames(bytes("가".repeat(129)))).toThrow();
-    expect(splitFrames(bytes("가".repeat(128)))).toHaveLength(10);
+    expect(splitFrames(bytes("가".repeat(128)))).toHaveLength(24);
   });
   it("rejects malformed, truncated, oversized, padded and corrupted frames", () => {
     const [frame] = splitFrames(bytes("hello"));
@@ -99,8 +109,8 @@ describe("plaintext optical v2", () => {
     for (const frame of a.slice(2).reverse())
       expect(collector.add(frame)).toBeNull();
     collector.add(a[0]);
-    expect(collector.count).toBe(4);
-    expect(collector.prefix).toBe("A".repeat(40));
+    expect(collector.count).toBe(a.length - 1);
+    expect(collector.prefix).toBe("A".repeat(CHUNK_BYTES));
     expect(collector.add(a[1])).toEqual(bytes("A".repeat(180)));
     expect(collector.prefix).toBe("A".repeat(180));
     collector.clear();
@@ -108,7 +118,7 @@ describe("plaintext optical v2", () => {
     expect(collector.prefix).toBe("B".repeat(180));
   });
   it("clears provisional text on total checksum failure", () => {
-    const frames = splitFrames(bytes("a".repeat(80)));
+    const frames = splitFrames(bytes("a".repeat(CHUNK_BYTES * 2)));
     const collector = new Collector();
     collector.add(frames[0]);
     frames[1][20] ^= 1;
@@ -120,7 +130,7 @@ describe("plaintext optical v2", () => {
     "rejects invalid or truncated UTF-8 %j and clears partial text",
     (...tail) => {
       const frames = splitFrames(
-        new Uint8Array([...bytes("a".repeat(40)), ...tail]),
+        new Uint8Array([...bytes("a".repeat(CHUNK_BYTES)), ...tail]),
       );
       const collector = new Collector();
       collector.add(frames[0]);
@@ -129,4 +139,11 @@ describe("plaintext optical v2", () => {
       expect(collector.total).toBe(0);
     },
   );
+});
+
+it("uses a compact particle frame with sixteen payload bytes for broader camera neighborhoods", () => {
+  const frames = splitFrames(bytes("x".repeat(17)));
+  expect(frames).toHaveLength(2);
+  expect(frames[0]).toHaveLength(40);
+  expect(parseFrame(frames[0])?.chunk).toHaveLength(16);
 });

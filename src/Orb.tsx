@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { drawOptical } from "./optical";
+import { drawOptical, SYMBOL_MS } from "./optical";
 
 export function drawNebula(
   ctx: CanvasRenderingContext2D,
@@ -34,10 +34,10 @@ export function Orb({
     function render(now: number) {
       if (!ctx || !el || document.hidden) return;
       const frame = frames.length
-        ? Math.floor((now - start) / 480) % frames.length
+        ? Math.floor((now - start) / SYMBOL_MS) % frames.length
         : -1;
       if (
-        (!reduced && !still && now - last >= 24) ||
+        (!reduced && !still && now - last >= 16) ||
         frame !== index ||
         last === -Infinity
       ) {
@@ -56,7 +56,7 @@ export function Orb({
       }
       if (reduced || still) {
         if (frames.length)
-          timer = window.setTimeout(() => render(performance.now()), 100);
+          timer = window.setTimeout(() => render(performance.now()), 40);
       } else raf = requestAnimationFrame(render);
     }
     const resume = () => {

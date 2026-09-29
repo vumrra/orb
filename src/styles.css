@@ -164,7 +164,7 @@ button:active:not(:disabled) {
   inset: 8.6%;
   width: 82.8%;
   height: 82.8%;
-  object-fit: cover;
+  object-fit: contain;
   border-radius: 50%;
   background: #101214;
 }
@@ -421,6 +421,35 @@ h1 {
   letter-spacing: 0.12em;
   color: #919aa5;
 }
+.receive-meter {
+  margin-bottom: 16px;
+}
+.meter-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+.meter-percent {
+  color: #e0e5eb;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.meter-track {
+  height: 3px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #2d3136;
+}
+.meter-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: left;
+  background: #d8e3ed;
+  box-shadow: 0 0 8px #d8e3ed66;
+  transition: transform 160ms ease-out;
+}
 .received-message pre {
   font-family: "SFMono-Regular", Consolas, monospace;
   font-size: 14px;
@@ -663,5 +692,32 @@ footer summary span {
     transition: none !important;
     animation: none !important;
     scroll-behavior: auto !important;
+  }
+}
+
+.is-candidate .reticle {
+  border-color: #c5d8e47a;
+  box-shadow: 0 0 16px #c5d8e414;
+  animation: acquire-pulse 600ms ease-out;
+}
+.is-candidate .target-label {
+  color: #deebf2;
+}
+@keyframes acquire-pulse {
+  0% {
+    transform: scale(0.985);
+    opacity: 0.55;
+  }
+  55% {
+    transform: scale(1.018);
+    opacity: 1;
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .is-candidate .reticle {
+    animation: none;
   }
 }

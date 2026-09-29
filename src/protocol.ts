@@ -1,8 +1,8 @@
 export const MAX_TEXT_BYTES = 384;
 const MIN_PACKET_BYTES = 1;
 const MAX_PACKET_BYTES = MAX_TEXT_BYTES;
-export const FRAME_BYTES = 64;
-export const CHUNK_BYTES = 40;
+export const FRAME_BYTES = 40;
+export const CHUNK_BYTES = 16;
 const MAX_FRAMES = Math.ceil(MAX_PACKET_BYTES / CHUNK_BYTES);
 export function crc32(bytes: Uint8Array): number {
   let crc = 0xffffffff;
@@ -30,12 +30,12 @@ export function splitFrames(packet: Uint8Array): Uint8Array[] {
     const frame = new Uint8Array(FRAME_BYTES);
     const view = new DataView(frame.buffer);
     const chunk = packet.slice(index * CHUNK_BYTES, (index + 1) * CHUNK_BYTES);
-    frame.set([0x4f, 0x42, 2, index, total, chunk.length]);
+    frame.set([0x4f, 0x42, 3, index, total, chunk.length]);
     frame.set(id, 6);
     view.setUint16(14, packet.length);
     view.setUint32(16, crc32(packet));
     frame.set(chunk, 20);
-    view.setUint32(60, crc32(frame.subarray(0, 60)));
+    view.setUint32(FRAME_BYTES - 4, crc32(frame.subarray(0, FRAME_BYTES - 4)));
     return frame;
   });
 }
@@ -45,8 +45,9 @@ export function parseFrame(bytes: Uint8Array): Frame | null {
   if (
     bytes[0] !== 0x4f ||
     bytes[1] !== 0x42 ||
-    bytes[2] !== 2 ||
-    crc32(bytes.subarray(0, 60)) !== view.getUint32(60)
+    bytes[2] !== 3 ||
+    crc32(bytes.subarray(0, FRAME_BYTES - 4)) !==
+      view.getUint32(FRAME_BYTES - 4)
   )
     return null;
   const index = bytes[3],
@@ -63,7 +64,8 @@ export function parseFrame(bytes: Uint8Array): Frame | null {
   )
     return null;
   if (size !== Math.min(CHUNK_BYTES, length - index * CHUNK_BYTES)) return null;
-  if (bytes.subarray(20 + size, 60).some((value) => value !== 0)) return null;
+  if (bytes.subarray(20 + size, FRAME_BYTES - 4).some((value) => value !== 0))
+    return null;
   return {
     id: Array.from(bytes.subarray(6, 14), (b) =>
       b.toString(16).padStart(2, "0"),

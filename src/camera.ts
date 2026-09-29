@@ -1,4 +1,4 @@
-import { decodePixels } from "./optical";
+import { scanPixels } from "./optical";
 export class Camera {
   private generation = 0;
   private stream: MediaStream | null = null;
@@ -27,6 +27,7 @@ export class Camera {
     facing: "environment" | "user",
     onFrame: (frame: Uint8Array) => void,
     onError: (error: unknown) => void,
+    onCandidate: (visible: boolean) => void = () => {},
   ): Promise<boolean> {
     this.stop();
     const generation = this.generation;
@@ -55,12 +56,14 @@ export class Camera {
       await video.play();
       if (generation !== this.generation) return false;
       const canvas = document.createElement("canvas");
-      canvas.width = canvas.height = 640;
+
       this.canvas = canvas;
       const ctx = canvas.getContext("2d", { willReadFrequently: true });
       if (!ctx)
         throw new Error("Canvas capture is unavailable in this browser.");
-      let last = -Infinity;
+      let last = -Infinity,
+        lastCandidate = -Infinity,
+        candidate = false;
       const fail = (error: unknown) => {
         if (generation === this.generation) {
           this.stop();
@@ -79,31 +82,48 @@ export class Camera {
       const tick = (time: number) => {
         if (generation !== this.generation) return;
         if (
-          time - last >= 120 &&
+          time - last >= 60 &&
           video.readyState >= 2 &&
           video.videoWidth &&
           video.videoHeight
         ) {
           last = time;
           try {
-            const side = Math.min(video.videoWidth, video.videoHeight);
-            ctx.drawImage(
-              video,
-              (video.videoWidth - side) / 2,
-              (video.videoHeight - side) / 2,
-              side,
-              side,
-              0,
-              0,
-              640,
-              640,
+            const scale = Math.min(
+              1,
+              640 / Math.max(video.videoWidth, video.videoHeight),
             );
-            const pixels = ctx.getImageData(0, 0, 640, 640);
-            const frame = decodePixels(pixels);
+            const width = Math.round(video.videoWidth * scale),
+              height = Math.round(video.videoHeight * scale);
+            if (canvas.width !== width || canvas.height !== height) {
+              canvas.width = width;
+              canvas.height = height;
+            }
+            ctx.drawImage(video, 0, 0, width, height);
+            const pixels = ctx.getImageData(0, 0, width, height);
+            const result = scanPixels(pixels, () => {
+              lastCandidate = time;
+              if (!candidate && generation === this.generation) {
+                candidate = true;
+                onCandidate(true);
+              }
+            });
             pixels.data.fill(0);
+            if (generation !== this.generation) {
+              result.frame?.fill(0);
+              return;
+            }
+            if (candidate && time - lastCandidate >= 500) {
+              candidate = false;
+              onCandidate(false);
+            }
+            const frame = result.frame;
             if (frame) {
-              onFrame(frame);
-              frame.fill(0);
+              try {
+                onFrame(frame);
+              } finally {
+                frame.fill(0);
+              }
             }
           } catch (error) {
             fail(error);

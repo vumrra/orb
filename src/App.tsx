@@ -60,6 +60,7 @@ export function App() {
   const [text, setText] = useState("");
   const [frames, setFrames] = useState<Uint8Array[]>(NO_FRAMES);
   const [received, setReceived] = useState("");
+  const [candidate, setCandidate] = useState(false);
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState({ count: 0, total: 0 });
@@ -67,7 +68,6 @@ export function App() {
   const [reduced, setReduced] = useState(
     () => matchMedia("(prefers-reduced-motion: reduce)").matches,
   );
-  const [offlineReady, setOfflineReady] = useState(false);
   const camera = useRef(new Camera());
   const collector = useRef(new Collector());
   const video = useRef<HTMLVideoElement>(null);
@@ -77,21 +77,19 @@ export function App() {
   const byteCount = new TextEncoder().encode(text).length;
   const inCamera = phase === "requesting" || phase === "scanning";
   const locked = phase !== "idle";
+  const percent =
+    phase === "received"
+      ? 100
+      : progress.total
+        ? Math.min(99, Math.round((progress.count / progress.total) * 100))
+        : 0;
 
   useEffect(() => {
     const media = matchMedia("(prefers-reduced-motion: reduce)");
     const change = () => setReduced(media.matches);
     media.addEventListener("change", change);
-    const readiness = () =>
-      setOfflineReady(!!navigator.serviceWorker?.controller);
-    readiness();
-    navigator.serviceWorker?.addEventListener("controllerchange", readiness);
     return () => {
       media.removeEventListener("change", change);
-      navigator.serviceWorker?.removeEventListener(
-        "controllerchange",
-        readiness,
-      );
       generation.current++;
       camera.current.stop();
       collector.current.clear();
@@ -111,6 +109,7 @@ export function App() {
     copying.current = false;
     setCopied(false);
     setError("");
+    setCandidate(false);
     setProgress({ count: 0, total: 0 });
     setPhase("idle");
     setMode(nextMode);
@@ -139,6 +138,7 @@ export function App() {
     let completed = false;
     collector.current.clear();
     setReceived("");
+    setCandidate(false);
     setProgress({ count: 0, total: 0 });
     setError("");
     setPhase("requesting");
@@ -148,6 +148,7 @@ export function App() {
       camera.current.stop();
       collector.current.clear();
       setReceived("");
+      setCandidate(false);
       setProgress({ count: 0, total: 0 });
       setPhase("idle");
       setError(cameraError(reason));
@@ -172,6 +173,9 @@ export function App() {
           setPhase("received");
         },
         fail,
+        (visible) => {
+          if (token === generation.current && !completed) setCandidate(visible);
+        },
       );
       if (started && token === generation.current && !completed)
         setPhase("scanning");
@@ -210,14 +214,10 @@ export function App() {
       : phase === "scanning"
         ? progress.total
           ? `${progress.count} / ${progress.total} frames received`
-          : "원 안에 상대 기기의 orb를 맞춰 주세요."
-        : phase === "broadcasting"
-          ? "다른 기기에서 Receive를 열고 이 orb를 스캔하세요."
-          : phase === "received"
-            ? "All frames received · checksum verified"
-            : mode === "send"
-              ? "화면에서 카메라로, 네트워크 없이."
-              : "카메라를 켜고 상대 orb를 비춰 주세요.";
+          : candidate
+            ? "Signal candidate · checking data…"
+            : "Searching…"
+        : "";
 
   return (
     <div className="app-shell">
@@ -249,7 +249,6 @@ export function App() {
           </svg>
           orb
         </a>
-        <span className="header-note">a little less connected.</span>
       </header>
       <main className="main">
         <nav className="mode-switch" aria-label="Transfer mode">
@@ -270,7 +269,7 @@ export function App() {
         </nav>
         <div className="light-stage">
           <div
-            className={`orb-stage ${inCamera ? "camera-active" : ""} ${phase === "received" ? "is-received" : ""}`}
+            className={`orb-stage ${inCamera ? "camera-active" : ""} ${inCamera && candidate ? "is-candidate" : ""} ${phase === "received" ? "is-received" : ""}`}
           >
             <Orb frames={frames} reduced={reduced} still={inCamera} />
             <video
@@ -287,7 +286,9 @@ export function App() {
                 <i />
                 <i />
                 <i />
-                <span className="target-label">Align orb here</span>
+                <span className="target-label">
+                  {candidate ? "Signal acquired" : ""}
+                </span>
               </div>
             )}
             {inCamera && (
@@ -323,9 +324,27 @@ export function App() {
                   <i />
                 </div>
               )}
-              <span className="field-label">
-                {phase === "received" ? "YOUR MESSAGE" : "RECEIVING"}
-              </span>
+              <div className="receive-meter">
+                <div className="meter-heading">
+                  <span className="field-label">
+                    {phase === "received" ? "RECEIVED" : "RECEIVING"}
+                  </span>
+                  <span className="meter-percent">{percent}%</span>
+                </div>
+                <div
+                  className="meter-track"
+                  role="progressbar"
+                  aria-label="Receive progress"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={percent}
+                >
+                  <span
+                    className="meter-fill"
+                    style={{ transform: `scaleX(${percent / 100})` }}
+                  />
+                </div>
+              </div>
               <pre
                 aria-label="Received message"
                 aria-live="polite"
@@ -380,9 +399,6 @@ export function App() {
               <Primary reduced={reduced} onClick={() => reset()}>
                 Stop sending <span aria-hidden="true">×</span>
               </Primary>
-              <p className="microcopy">
-                받은 기기에서 완료를 확인한 뒤 멈추세요.
-              </p>
             </>
           ) : (
             <>
@@ -428,13 +444,6 @@ export function App() {
                   </select>
                 </div>
               )}
-              {inCamera && progress.total > 0 && (
-                <progress
-                  max={progress.total}
-                  value={progress.count}
-                  aria-label="Received frames"
-                />
-              )}
               <Primary
                 reduced={reduced}
                 disabled={
@@ -464,39 +473,7 @@ export function App() {
             </p>
           )}
         </section>
-        <p className="camera-warning">
-          Not encrypted. Anyone who can film the orb can read it.
-        </p>
       </main>
-      <footer>
-        <details>
-          <summary>
-            Only light travels.<span aria-hidden="true">＋</span>
-          </summary>
-          <div className="details-content">
-            <p>
-              Plain UTF-8 travels through the orb. Frame and message checksums
-              detect accidental corruption; they do not authenticate the sender.
-              Partial text is provisional until the whole message checks out.
-            </p>
-            <p>
-              메시지와 카메라 영상은 서버에 보내거나 저장하지 않습니다. 브라우저
-              메모리의 완전한 삭제는 보장할 수 없습니다. 복사한 메시지는
-              클립보드에 남을 수 있습니다.
-            </p>
-            <p>
-              카메라에는 HTTPS 또는 localhost가 필요합니다. 화면을 정면으로
-              비추고 orb가 원을 채우도록 맞추세요. 실기기 촬영 성능과 보안
-              감사는 아직 검증 전입니다.
-            </p>
-            <p>
-              {offlineReady
-                ? "Offline app ready. 최초 로딩 이후 인터넷 없이 다시 열 수 있습니다."
-                : "오프라인 재실행은 production build의 최초 로딩 후 사용할 수 있습니다."}
-            </p>
-          </div>
-        </details>
-      </footer>
     </div>
   );
 }

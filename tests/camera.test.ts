@@ -70,3 +70,35 @@ it("rejects insecure contexts before requesting permission", async () => {
   ).rejects.toThrow("HTTPS");
   expect(getUserMedia).not.toHaveBeenCalled();
 });
+
+it("captures the whole landscape frame, preserving off-center signals", async () => {
+  const { video } = setup();
+  Object.assign(video, { readyState: 2, videoWidth: 1280, videoHeight: 720 });
+  const drawImage = vi.fn();
+  const getImageData = vi.fn(() => ({
+    width: 640,
+    height: 360,
+    data: new Uint8ClampedArray(640 * 360 * 4),
+  }));
+  vi.stubGlobal("document", {
+    createElement: () => ({
+      width: 0,
+      height: 0,
+      getContext: () => ({ drawImage, getImageData }),
+    }),
+  });
+  let tick!: (time: number) => void;
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    vi.fn((fn) => {
+      tick = fn;
+      return 7;
+    }),
+  );
+  const camera = new Camera();
+  await camera.start(video, "environment", vi.fn(), vi.fn());
+  tick(0);
+  expect(drawImage).toHaveBeenCalledWith(video, 0, 0, 640, 360);
+  expect(getImageData).toHaveBeenCalledWith(0, 0, 640, 360);
+  camera.stop();
+});

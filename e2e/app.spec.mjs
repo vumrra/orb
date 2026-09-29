@@ -4,23 +4,58 @@ import { test, expect } from "@playwright/test";
 // Holding one frame lets assertions prove progress is driven by data, not time.
 async function opticalCamera(page, message) {
   await page.evaluate(async (message) => {
-    const { splitFrames, crc32 } = await import("/src/protocol.ts");
-    const { drawOptical } = await import("/src/optical.ts");
+    const { splitFrames, crc32, FRAME_BYTES } =
+      await import("/src/protocol.ts");
+    const { drawOptical, SYMBOL_MS } = await import("/src/optical.ts");
     const frames = splitFrames(new TextEncoder().encode(message));
     const other = splitFrames(
       new TextEncoder().encode("other sender ".repeat(12)),
     );
     const canvas = document.createElement("canvas");
-    canvas.width = canvas.height = 640;
+    canvas.width = 960;
+    canvas.height = 540;
     const ctx = canvas.getContext("2d");
-    window.__paint = (index, kind = "valid") => {
+    let selected = { index: 0, kind: "valid" };
+    const origin = performance.now();
+    const render = () => {
+      ctx.fillStyle = "#090a0b";
+      ctx.fillRect(0, 0, 960, 540);
+      if (!selected) return;
+      const { index, kind } = window.__auto
+        ? {
+            index:
+              Math.floor((performance.now() - origin) / SYMBOL_MS) %
+              frames.length,
+            kind: "valid",
+          }
+        : selected;
       const frame = (kind === "mixed" ? other[index] : frames[index]).slice();
       if (kind === "corrupt" || kind === "checksum") frame[20] ^= 1;
       if (kind === "checksum")
-        new DataView(frame.buffer).setUint32(60, crc32(frame.subarray(0, 60)));
+        new DataView(frame.buffer).setUint32(
+          FRAME_BYTES - 4,
+          crc32(frame.subarray(0, FRAME_BYTES - 4)),
+        );
       ctx.fillStyle = "#090a0b";
-      ctx.fillRect(0, 0, 640, 640);
-      drawOptical(ctx, frame, 320, 320, 265, 0, 0.75);
+      ctx.fillRect(0, 0, 960, 540);
+      drawOptical(
+        ctx,
+        frame,
+        690,
+        270,
+        190,
+        0.23,
+        window.__reduced ? 0.75 : 0.75 + (performance.now() - origin) / 1000,
+      );
+    };
+    window.__reduced = matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.__paint = (index, kind = "valid") => {
+      selected = { index, kind };
+      render();
+    };
+    window.__blank = () => {
+      selected = null;
+      render();
     };
     window.__paint(0);
     Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
@@ -37,7 +72,7 @@ async function opticalCamera(page, message) {
             clearInterval(refresh);
             return;
           }
-          ctx.drawImage(canvas, 0, 0);
+          render();
         }, 50);
         return window.__testStream;
       },
@@ -72,7 +107,7 @@ test("message alone enables immediate sending, no PIN in either mode", async ({
     page.getByText("Not encrypted. Anyone who can film the orb can read it.", {
       exact: true,
     }),
-  ).toBeVisible();
+  ).toHaveCount(0);
   await page.getByRole("button", { name: "Create orb" }).click();
   await expect(
     page.getByRole("heading", { name: "Ready to scan" }),
@@ -103,16 +138,18 @@ for (const reduced of [false, true]) {
       reducedMotion: reduced ? "reduce" : "no-preference",
     });
     await page.goto("/");
-    const prefix = "a".repeat(39);
-    const message = prefix + "🌒한글 " + "z".repeat(55);
+    const prefix = "a".repeat(15);
+    const message = prefix + "🌒한글 " + "z".repeat(20);
     await opticalCamera(page, message);
     await start(page);
     const result = page.getByLabel("Received message", { exact: true });
     await expect(result).toHaveText(prefix, { timeout: 12000 });
-    await expect(page.getByRole("status")).toContainText("1 / 3");
+    await expect(
+      page.getByRole("progressbar", { name: "Receive progress" }),
+    ).toHaveAttribute("aria-valuenow", "33");
     await expect(page.getByLabel("Camera preview")).toBeVisible();
     await expect(
-      page.getByText("Align orb here", { exact: true }),
+      page.getByText("Signal acquired", { exact: true }),
     ).toBeVisible();
     const before = await page.locator(".received-message").boundingBox();
     const stage = await page.locator(".orb-stage").boundingBox();
@@ -146,7 +183,9 @@ for (const reduced of [false, true]) {
     expect(trail).toBe(reduced ? "none" : "block");
     // Reordered final frame, then duplicates/mixed/corrupt: no text across a gap.
     await paint(page, 2);
-    await expect(page.getByRole("status")).toContainText("2 / 3");
+    await expect(
+      page.getByRole("progressbar", { name: "Receive progress" }),
+    ).toHaveAttribute("aria-valuenow", "67");
     for (const [index, kind] of [
       [0, "valid"],
       [0, "mixed"],
@@ -155,13 +194,18 @@ for (const reduced of [false, true]) {
       await paint(page, index, kind);
       await page.waitForTimeout(400);
       await expect(result).toHaveText(prefix);
-      await expect(page.getByRole("status")).toContainText("2 / 3");
+      await expect(
+        page.getByRole("progressbar", { name: "Receive progress" }),
+      ).toHaveAttribute("aria-valuenow", "67");
     }
     await paint(page, 1);
     await expect(
       page.getByRole("heading", { name: "Message received" }),
     ).toBeVisible();
     await expect(result).toHaveText(message);
+    await expect(
+      page.getByRole("progressbar", { name: "Receive progress" }),
+    ).toHaveAttribute("aria-valuenow", "100");
     expect(
       await page
         .locator(".decoded-character")
@@ -170,7 +214,8 @@ for (const reduced of [false, true]) {
     ).toBe(true);
     expect(await stopped(page)).toBe(true);
     const after = await page.locator(".received-message").boundingBox();
-    expect(after.y).toBeCloseTo(before.y, 0);
+    const finalStage = await page.locator(".orb-stage").boundingBox();
+    expect(after.y - finalStage.y).toBeCloseTo(before.y - stage.y, 0);
     expect(after.width).toBe(before.width);
     await expect(
       page.getByRole("button", { name: /Reveal|Hide message/ }),
@@ -200,11 +245,11 @@ test("checksum failure clears provisional text and stops camera; retry and reset
   page,
 }) => {
   await page.goto("/");
-  const message = "a".repeat(80);
+  const message = "a".repeat(32);
   await opticalCamera(page, message);
   await start(page);
   await expect(page.getByLabel("Received message", { exact: true })).toHaveText(
-    "a".repeat(40),
+    "a".repeat(16),
   );
   await paint(page, 1, "checksum");
   await expect(page.getByRole("alert")).toContainText("checksum");
@@ -232,7 +277,7 @@ for (const action of ["Cancel", "Send"]) {
     await start(page);
     await expect(
       page.getByLabel("Received message", { exact: true }),
-    ).toHaveText("x".repeat(40));
+    ).toHaveText("x".repeat(16));
     await page.getByRole("button", { name: action, exact: true }).click();
     expect(await stopped(page)).toBe(true);
     if (action === "Send")
@@ -366,3 +411,54 @@ for (const [width, height] of [
     }
   });
 }
+
+test("candidate reacts before valid data, expires, then receives from an off-center landscape stream", async ({
+  page,
+}) => {
+  await page.goto("/");
+  await opticalCamera(page, "acquisition");
+  await paint(page, 0, "corrupt");
+  await start(page);
+  await expect(page.getByRole("status")).toContainText("Signal candidate");
+  await expect(page.locator(".orb-stage")).toHaveClass(/is-candidate/);
+  await expect(
+    page.getByLabel("Received message", { exact: true }),
+  ).toBeEmpty();
+  await expect(
+    page.getByRole("progressbar", { name: "Receive progress" }),
+  ).toHaveAttribute("aria-valuenow", "0");
+  await page.evaluate(() => window.__blank());
+  await expect(page.getByRole("status")).toContainText("Searching");
+  await expect(page.locator(".orb-stage")).not.toHaveClass(/is-candidate/);
+  await paint(page, 0);
+  await expect(
+    page.getByRole("heading", { name: "Message received" }),
+  ).toBeVisible();
+  await expect(page.getByLabel("Received message", { exact: true })).toHaveText(
+    "acquisition",
+  );
+});
+
+test("automatically collects a moving, advancing capture stream at the configured symbol cadence", async ({
+  page,
+}) => {
+  await page.goto("/");
+  const message = "Fast wave particles 🌒 한글 ".repeat(3);
+  await opticalCamera(page, message);
+  await page.evaluate(() => (window.__auto = true));
+  const began = Date.now();
+  await start(page);
+  await expect(
+    page.getByRole("heading", { name: "Message received" }),
+  ).toBeVisible({ timeout: 12000 });
+  await expect(page.getByLabel("Received message", { exact: true })).toHaveText(
+    message,
+  );
+  console.log(
+    JSON.stringify({
+      captureStreamReceiveMs: Date.now() - began,
+      bytes: new TextEncoder().encode(message).length,
+    }),
+  );
+  expect(await stopped(page)).toBe(true);
+});
