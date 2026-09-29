@@ -128,7 +128,9 @@ function Primary({
   );
 }
 export function App() {
-  const [transport, setTransport] = useState<"orb" | "bar" | "sound">("orb");
+  const [transport, setTransport] = useState<"orb" | "bar" | "sound" | "qr">(
+    "orb",
+  );
   const [mode, setMode] = useState<Mode>("send");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -320,6 +322,7 @@ export function App() {
               onFrame,
               fail,
               onCandidate,
+              transport,
             );
       if (started && token === generation.current && !completed)
         setPhase("scanning");
@@ -379,7 +382,7 @@ export function App() {
         <button
           className="wordmark"
           type="button"
-          aria-label={`Switch to ${transport === "orb" ? "Bar" : transport === "bar" ? "Sound" : "Orb"}`}
+          aria-label={`Switch to ${transport === "orb" ? "Bar" : transport === "bar" ? "Sound" : transport === "sound" ? "QR" : "Orb"}`}
           onClick={() => {
             reset(mode, phase === "idle");
             setTransport(
@@ -387,7 +390,9 @@ export function App() {
                 ? "bar"
                 : transport === "bar"
                   ? "sound"
-                  : "orb",
+                  : transport === "sound"
+                    ? "qr"
+                    : "orb",
             );
           }}
         >
@@ -398,7 +403,13 @@ export function App() {
             fill="none"
             aria-hidden="true"
           >
-            {transport === "sound" ? (
+            {transport === "qr" ? (
+              <path
+                d="M3 3h6v6H3zM15 3h6v6h-6zM3 15h6v6H3zM15 15h3v3h3v3h-6z"
+                stroke="currentColor"
+                strokeWidth="1.5"
+              />
+            ) : transport === "sound" ? (
               <path
                 d="M4 10v4m4-7v10m4-13v16m4-13v10m4-7v4"
                 stroke="currentColor"
@@ -433,7 +444,13 @@ export function App() {
               </>
             )}
           </svg>
-          {transport === "orb" ? "Orb" : transport === "bar" ? "Bar" : "Sound"}
+          {transport === "orb"
+            ? "Orb"
+            : transport === "bar"
+              ? "Bar"
+              : transport === "sound"
+                ? "Sound"
+                : "QR"}
         </button>
         <button
           type="button"
@@ -462,7 +479,9 @@ export function App() {
           <span>{theme === "dark" ? "Light" : "Dark"}</span>
         </button>
       </header>
-      <main className="main">
+      <main
+        className={`main ${transport === "qr" && mode === "send" ? "qr-send" : ""}`}
+      >
         <nav className="mode-switch" aria-label="Transfer mode">
           <button
             aria-pressed={mode === "send"}

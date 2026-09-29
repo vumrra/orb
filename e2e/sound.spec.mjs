@@ -131,6 +131,7 @@ test("Sound cancels pending microphone permissions and preserves idle drafts thr
   await expect
     .poll(() => page.evaluate(() => typeof window.__grant))
     .toBe("function");
+  await page.getByRole("button", { name: "Switch to QR" }).click();
   await page.getByRole("button", { name: "Switch to Orb" }).click();
   await page.evaluate(() => {
     window.__late = window.__streams[0].clone();

@@ -846,3 +846,23 @@ footer summary span {
   background: #ffffff;
   color: #171b21;
 }
+
+/* QR density follows the visible CSS area; the camera keeps its circular shell. */
+.main.qr-send {
+  width: min(100% - 40px, 600px);
+}
+.qr-send .light-stage {
+  --orb-size: min(600px, calc(100vw - 40px));
+}
+.qr-send .controls,
+.qr-send .intro {
+  width: min(100%, 400px);
+}
+.qr-canvas {
+  image-rendering: pixelated;
+}
+[data-theme="light"][data-transport="qr"] .orb-stage:not(.camera-shell) {
+  background: none;
+  border-radius: 0;
+  box-shadow: none;
+}

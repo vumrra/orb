@@ -1,4 +1,11 @@
 import { useEffect, useRef } from "react";
+import {
+  createQrPackets,
+  drawQr,
+  qrMatrix,
+  QR_SLOT_MS,
+  type QrMatrix,
+} from "./qr";
 import type { FrameSource } from "./protocol";
 import { drawOptical, SYMBOL_MS } from "./optical";
 import { opticalFrames } from "./optical-fec";
@@ -29,11 +36,12 @@ export function Orb({
   frames: FrameSource;
   reduced: boolean;
   still?: boolean;
-  transport?: "orb" | "bar" | "sound";
+  transport?: "orb" | "bar" | "sound" | "qr";
   meter?: { level: number; waveform?: Float32Array };
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   useEffect(() => {
+    if (transport === "qr") return;
     const el = canvas.current;
     if (!el) return;
     const ctx = el.getContext("2d");
@@ -187,6 +195,7 @@ export function Orb({
       opticalSource?.clear();
     };
   }, [frames, reduced, still, transport, meter]);
+  if (transport === "qr") return <QrCanvas frames={frames} />;
   return (
     <canvas
       ref={canvas}
@@ -204,6 +213,77 @@ export function Orb({
             : frames.length
               ? "Moving light carrying the message"
               : "A flowing silver particle orb"
+      }
+    />
+  );
+}
+
+function QrCanvas({ frames }: { frames: FrameSource }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const el = canvas.current!;
+    const ctx = el.getContext("2d");
+    if (!ctx) return;
+    let timer = 0,
+      matrix: QrMatrix | null = null,
+      index = -1;
+    // App owns the wire buffer and clears it on cancellation/unmount. Resizing
+    // and StrictMode effect cleanup only release this renderer's packet view.
+    let packets: ReturnType<typeof createQrPackets> | null = null;
+    const clearMatrix = () => {
+      matrix?.data.fill(0);
+      matrix = null;
+    };
+    const paint = () => {
+      if (document.hidden || !packets) return;
+      if (!frames.length) {
+        drawQr(ctx, null, el.width);
+        return;
+      }
+      index = (index + 1) % packets.length;
+      const packet = packets.get(index);
+      try {
+        clearMatrix();
+        matrix = qrMatrix(packet, packets.profile.version);
+      } finally {
+        packet.fill(0);
+      }
+      drawQr(ctx, matrix, el.width);
+    };
+    const resize = () => {
+      const size = Math.floor(el.parentElement!.getBoundingClientRect().width);
+      if (!size) return;
+      clearInterval(timer);
+      packets?.clear();
+      clearMatrix();
+      index = -1;
+      el.width = el.height = size;
+      packets = createQrPackets(
+        { get: (i) => frames.get(i), length: frames.length, clear() {} },
+        size,
+      );
+      paint();
+      if (frames.length) timer = window.setInterval(paint, QR_SLOT_MS);
+    };
+    const observer = new ResizeObserver(resize);
+    observer.observe(el.parentElement!);
+    resize();
+    return () => {
+      clearInterval(timer);
+      observer.disconnect();
+      clearMatrix();
+      packets?.clear();
+      ctx.clearRect(0, 0, el.width, el.height);
+      el.width = el.height = 0;
+    };
+  }, [frames]);
+  return (
+    <canvas
+      ref={canvas}
+      className="orb-canvas qr-canvas"
+      role="img"
+      aria-label={
+        frames.length ? "QR code carrying the message" : "QR finder outlines"
       }
     />
   );

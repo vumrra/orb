@@ -344,3 +344,66 @@ it("cancellation during automatic camera setup cannot restart playback", async (
   expect(stop).toHaveBeenCalledOnce();
   expect(video.play).not.toHaveBeenCalled();
 });
+
+for (const preferred of ["auto", "orb", "bar", "qr"] as const) {
+  it(`Camera autodetects binary QR from full-field pixels, preference ${preferred}`, async () => {
+    setup();
+    const { createFrames } = await import("../src/protocol");
+    const { createQrPackets, qrMatrix, drawQr } = await import("../src/qr");
+    const raw = new TextEncoder().encode("binary QR camera 한글 ".repeat(100));
+    const packets = createQrPackets(createFrames(raw), 335);
+    const screen = createCanvas(1024, 640),
+      ctx = screen.getContext("2d");
+    const video = Object.assign(screen, {
+      play: vi.fn().mockResolvedValue(undefined),
+      pause: vi.fn(),
+      readyState: 2,
+      videoWidth: 1024,
+      videoHeight: 640,
+      srcObject: null,
+    }) as unknown as HTMLVideoElement;
+    vi.stubGlobal("document", {
+      hidden: false,
+      createElement: () => createCanvas(1, 1),
+    });
+    let tick!: (time: number) => void;
+    vi.stubGlobal(
+      "requestAnimationFrame",
+      vi.fn((fn) => {
+        tick = fn;
+        return 7;
+      }),
+    );
+    const collector = new Collector(),
+      camera = new Camera(),
+      errors = vi.fn();
+    let result: Uint8Array | null = null;
+    await camera.start(
+      video,
+      "environment",
+      (f) => {
+        result = collector.add(f) || result;
+      },
+      errors,
+      vi.fn(),
+      preferred,
+    );
+    for (let i = 0; i < packets.length * 3; i++) {
+      ctx.fillStyle = "#151515";
+      ctx.fillRect(0, 0, 1024, 640);
+      ctx.save();
+      ctx.translate(630, 140);
+      drawQr(
+        ctx as unknown as CanvasRenderingContext2D,
+        qrMatrix(packets.get(i % packets.length), packets.profile.version),
+        335,
+      );
+      ctx.restore();
+      tick(i * 1000);
+    }
+    expect(errors).not.toHaveBeenCalled();
+    expect(result).toEqual(raw);
+    camera.stop();
+    packets.clear();
+  });
+}

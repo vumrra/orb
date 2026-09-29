@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
 
 const toggle = (page) =>
-  page.getByRole("button", { name: /Switch to (Bar|Sound|Orb)/ });
+  page.getByRole("button", { name: /Switch to (Bar|Sound|QR|Orb)/ });
 const start = async (page) => {
   await page.getByRole("button", { name: "Receive", exact: true }).click();
   await page.getByRole("button", { name: "Start camera", exact: true }).click();
@@ -146,6 +146,8 @@ test("keyboard logo toggle keeps idle composition and resets active transfer", a
   await toggle(page).focus();
   await page.keyboard.press("Space");
   await expect(toggle(page)).toHaveText("Sound");
+  await toggle(page).click();
+  await expect(toggle(page)).toHaveText("QR");
   await toggle(page).click();
   await expect(toggle(page)).toHaveText("Orb");
   await expect(page.getByLabel("Your message")).toHaveValue("");

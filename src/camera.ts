@@ -1,3 +1,4 @@
+import { scanQr } from "./qr";
 import { OpticalTracker } from "./optical";
 import { OpticalRecovery } from "./optical-fec";
 import { BarCollector, BarTracker } from "./bar";
@@ -7,7 +8,7 @@ export class Camera {
   private bar = new BarTracker();
   private optical = new OpticalTracker();
   private recovery = new OpticalRecovery();
-  private detected: "orb" | "bar" | null = null;
+  private detected: "orb" | "bar" | "qr" | null = null;
   private stream: MediaStream | null = null;
   private video: HTMLVideoElement | null = null;
   private canvas: HTMLCanvasElement | null = null;
@@ -40,6 +41,7 @@ export class Camera {
     onFrame: (frame: Uint8Array) => void,
     onError: (error: unknown) => void,
     onCandidate: (visible: boolean) => void = () => {},
+    preferred: "auto" | "orb" | "bar" | "qr" = "auto",
   ): Promise<boolean> {
     this.stop();
     const generation = this.generation;
@@ -94,6 +96,9 @@ export class Camera {
       let interval = 25;
       let last = -Infinity,
         lastCandidate = -Infinity,
+        lastQr = -Infinity,
+        lastQrSignal = -Infinity,
+        lastOtherSignal = -Infinity,
         candidate = false;
       const fail = (error: unknown) => {
         if (generation === this.generation) {
@@ -142,19 +147,49 @@ export class Camera {
               }
             };
             let result: { frame: Uint8Array | null } = { frame: null };
-            const opticalFirst = this.detected === "orb";
-            if (opticalFirst) result = this.optical.scan(pixels, markCandidate);
-            if (!result.frame) {
-              const bar = this.bar.scan(pixels);
-              if (bar.candidate) markCandidate();
-              if (bar.symbol) {
-                this.detected = "bar";
-                result = { frame: this.fragments.add(bar.symbol) };
-                bar.symbol.fill(0);
-              } else if (!opticalFirst) {
-                result = this.optical.scan(pixels, markCandidate);
-                if (result.frame) this.detected = "orb";
+            let qrFrames: Uint8Array[] | null = null;
+            const qrFirst =
+              this.detected === "qr" || (!this.detected && preferred === "qr");
+            const tryQr = () => {
+              lastQr = time;
+              const decoded = scanQr(pixels);
+              if (decoded) {
+                this.detected = "qr";
+                lastQrSignal = time;
+                markCandidate();
               }
+              return decoded;
+            };
+            if (qrFirst) qrFrames = tryQr();
+            // After acquisition, leave every available camera sample to QR. A
+            // missed slot can be recovered next loop; fall back after 600 ms.
+            if (!qrFrames && time - lastQrSignal > 600) {
+              const opticalFirst = this.detected === "orb";
+              if (opticalFirst)
+                result = this.optical.scan(pixels, markCandidate);
+              if (!result.frame) {
+                const bar = this.bar.scan(pixels);
+                if (bar.candidate) markCandidate();
+                if (bar.symbol) {
+                  this.detected = "bar";
+                  lastOtherSignal = time;
+                  result = { frame: this.fragments.add(bar.symbol) };
+                  bar.symbol.fill(0);
+                } else if (!opticalFirst) {
+                  result = this.optical.scan(pixels, markCandidate);
+                  if (result.frame) this.detected = "orb";
+                }
+              }
+              if (result.frame) lastOtherSignal = time;
+              // Unknown QR costs at most one attempt per 300 ms, and never
+              // takes decoding time away from an acquired Orb/Bar signal.
+              if (
+                !qrFirst &&
+                !result.frame &&
+                time - lastOtherSignal > 200 &&
+                time - lastQr >= 300
+              )
+                qrFrames = tryQr();
             }
             pixels.data.fill(0);
             // Leave rendering headroom on slower devices, without throwing away camera detail.
@@ -162,11 +197,22 @@ export class Camera {
 
             if (generation !== this.generation) {
               result.frame?.fill(0);
+              qrFrames?.forEach((data) => data.fill(0));
               return;
             }
             if (candidate && time - lastCandidate >= 500) {
               candidate = false;
               onCandidate(false);
+            }
+            if (qrFrames) {
+              try {
+                for (const data of qrFrames) {
+                  if (generation !== this.generation) break;
+                  onFrame(data);
+                }
+              } finally {
+                qrFrames.forEach((data) => data.fill(0));
+              }
             }
             const frame = result.frame;
             if (frame) {
