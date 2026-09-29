@@ -1,6 +1,8 @@
 import type { FrameSource } from "./protocol";
 import { encodeSound, SoundDecoder } from "./sound";
 
+const SOUND_GAIN = 0.15;
+
 // Capture only. The worklet's output stays zero, so microphones never echo to speakers.
 const CAPTURE = `class PCM extends AudioWorkletProcessor {
   constructor(){super();this.pcm=new Float32Array(1024);this.used=0;}
@@ -95,6 +97,10 @@ export class Sound {
       throw new Error("Audio could not start. Try again.");
     const token = this.generation,
       fail = this.watch(token, onError);
+    const output = context.createGain();
+    output.gain.value = SOUND_GAIN;
+    output.connect(context.destination);
+    this.nodes.add(output);
     let index = 0,
       next = context.currentTime + 0.06;
     const ends = new WeakMap<AudioBufferSourceNode, number>();
@@ -120,7 +126,7 @@ export class Sound {
           pcm.fill(0);
           const node = context.createBufferSource();
           node.buffer = buffer;
-          node.connect(context.destination);
+          node.connect(output);
           this.buffers.add(node);
           node.onended = () => {
             buffer.getChannelData(0).fill(0);

@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import type { FrameSource } from "./protocol";
 import { drawOptical, SYMBOL_MS } from "./optical";
+import { opticalFrames } from "./optical-fec";
 import {
   drawBar,
   splitBarFrame,
@@ -41,14 +42,16 @@ export function Orb({
       timer = 0,
       last = -Infinity,
       index = -1;
+    const opticalSource = transport === "orb" ? opticalFrames(frames) : null;
+    const source = opticalSource ?? frames;
     const symbolCount =
-      (transport === "sound" ? 0 : frames.length) *
+      (transport === "sound" ? 0 : source.length) *
       (transport === "bar" ? 2 : 1);
     let cachedIndex = -1;
     let current: Uint8Array | null = null,
       previous: Uint8Array | null = null;
     function getSymbol(index: number) {
-      const frame = frames.get(
+      const frame = source.get(
         transport === "bar" ? Math.floor(index / 2) : index,
       );
       if (transport !== "bar") return frame;
@@ -181,6 +184,7 @@ export function Orb({
       ctx.clearRect(0, 0, el.width, el.height);
       current?.fill(0);
       previous?.fill(0);
+      opticalSource?.clear();
     };
   }, [frames, reduced, still, transport, meter]);
   return (

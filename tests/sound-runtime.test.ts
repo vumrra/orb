@@ -86,7 +86,17 @@ it("schedules bounded real PCM lazily, and cancels every output on interruption"
     stop: ReturnType<typeof vi.fn>;
     onended: unknown;
   }[] = [];
+  const gain = {
+    gain: {
+      value: 1,
+      cancelScheduledValues: vi.fn(),
+      setTargetAtTime: vi.fn(),
+    },
+    connect: vi.fn(),
+    disconnect: vi.fn(),
+  };
   Object.assign(context, {
+    createGain: () => gain,
     sampleRate: 48000,
     currentTime: 0,
     destination: {},
@@ -115,6 +125,8 @@ it("schedules bounded real PCM lazily, and cancels every output on interruption"
   try {
     await sound.open();
     sound.send(source, fail);
+    expect(gain.gain.value).toBe(0.15);
+    expect("setVolume" in sound).toBe(false);
     expect(get.mock.calls.length).toBeGreaterThan(0);
     expect(get.mock.calls.length).toBeLessThanOrEqual(3);
     expect(

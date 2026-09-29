@@ -34,6 +34,7 @@ for (const reduced of [false, true])
   test(`Sound actual sender PCM to microphone to DOM, reduced=${reduced}`, async ({
     page,
   }) => {
+    test.setTimeout(45000);
     await silentWire(page);
     await page.emulateMedia({
       reducedMotion: reduced ? "reduce" : "no-preference",
@@ -81,12 +82,13 @@ for (const reduced of [false, true])
     await sender.screenshot({ path: `/tmp/orb-sound-active-${reduced}.png` });
     await expect(
       receiver.getByRole("heading", { name: "Message received" }),
-    ).toBeVisible({ timeout: 10000 });
+      // Narrower/lower carriers require 16ms symbols: 21.253s nominal PCM.
+    ).toBeVisible({ timeout: 30000 });
     const elapsed = Date.now() - began;
     await expect(
       receiver.getByLabel("Received message", { exact: true }),
     ).toHaveText(message);
-    expect(elapsed).toBeLessThan(10000);
+    expect(elapsed).toBeLessThan(30000);
     await expect(receiver.getByRole("progressbar")).toHaveAttribute(
       "aria-valuenow",
       "100",
@@ -139,6 +141,25 @@ test("Sound cancels pending microphone permissions and preserves idle drafts thr
           window.__late.getTracks().every((t) => t.readyState === "ended") &&
           window.__contexts.every((c) => c.state === "closed"),
       ),
+    )
+    .toBe(true);
+});
+
+test("Sound uses fixed quiet output without volume controls", async ({
+  page,
+}) => {
+  await silentWire(page);
+  await page.goto("/");
+  await sound(page);
+  await expect(page.getByRole("slider")).toHaveCount(0);
+  expect(await page.evaluate(() => window.__contexts.length)).toBe(0);
+  await page.getByLabel("Your message").fill("quiet sound");
+  await page.getByRole("button", { name: "Create sound" }).click();
+  await expect(page.getByRole("slider")).toHaveCount(0);
+  await page.getByRole("button", { name: "Stop sending" }).click();
+  await expect
+    .poll(() =>
+      page.evaluate(() => window.__contexts.every((c) => c.state === "closed")),
     )
     .toBe(true);
 });

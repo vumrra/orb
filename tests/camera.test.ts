@@ -202,3 +202,76 @@ it("passes raster pixels through Camera and Collector, clearing incomplete fragm
   expect(collector.prefix).toBe("pixels");
   camera.stop();
 });
+
+it("Camera restores 1k from degraded optical pixels with two data frames missing per block", async () => {
+  setup();
+  const { drawOptical } = await import("../src/optical");
+  const { opticalFrames, parseOpticalFrame } =
+    await import("../src/optical-fec");
+  const { createFrames } = await import("../src/protocol");
+  const source = createCanvas(640, 520),
+    ctx = source.getContext("2d");
+  const video = Object.assign(source, {
+    play: vi.fn().mockResolvedValue(undefined),
+    pause: vi.fn(),
+    readyState: 2,
+    videoWidth: 640,
+    videoHeight: 520,
+    srcObject: null,
+  }) as unknown as HTMLVideoElement;
+  vi.stubGlobal("document", {
+    hidden: false,
+    createElement: () => createCanvas(1, 1),
+  });
+  let tick!: (time: number) => void,
+    now = 0;
+  vi.stubGlobal(
+    "requestAnimationFrame",
+    vi.fn((fn) => {
+      tick = fn;
+      return 7;
+    }),
+  );
+  const camera = new Camera(),
+    collector = new Collector(),
+    bytes = new TextEncoder().encode("abcdefghij".repeat(100));
+  const frames = opticalFrames(createFrames(bytes));
+  let result: Uint8Array | null = null;
+  const errors = vi.fn();
+  await camera.start(
+    video,
+    "environment",
+    (f) => {
+      expect(f[1]).toBe(4);
+      result = collector.add(f) || result;
+    },
+    errors,
+  );
+  const clean = createCanvas(640, 520),
+    c = clean.getContext("2d");
+  for (let i = 0; i < frames.length; i++) {
+    const frame = frames.get(i),
+      meta = parseOpticalFrame(frame)!;
+    if (frame[1] === 4 && meta.index % 8 < 2) continue;
+    c.fillStyle = "#090909";
+    c.fillRect(0, 0, 640, 520);
+    drawOptical(
+      c as unknown as CanvasRenderingContext2D,
+      frame,
+      365,
+      255,
+      210,
+      0.23,
+      0.75,
+    );
+    ctx.filter = "blur(2px)";
+    ctx.drawImage(clean, 0, 0);
+    ctx.filter = "none";
+    tick((now += 1000));
+  }
+  expect(errors).not.toHaveBeenCalled();
+  expect(result).toEqual(bytes);
+  expect(collector.count).toBe(collector.total);
+  camera.stop();
+  frames.clear();
+});

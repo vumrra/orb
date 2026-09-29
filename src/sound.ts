@@ -1,11 +1,11 @@
 import { FRAME_BYTES, parseFrame } from "./protocol";
 
-// Eight independent 4-FSK lanes: 16 bits per 6ms symbol, audible 1–8.75kHz.
+// Eight independent 4-FSK lanes: 16 bits per 16ms symbol, audible 875–4750Hz.
 // Four clock/preamble symbols, 20 frame symbols, two silent guard symbols.
-export const SOUND_SYMBOL_SECONDS = 0.006;
+export const SOUND_SYMBOL_SECONDS = 0.016;
 const PREAMBLE = [0x1b1b, 0xe4e4, 0x4e4e, 0xb1b1];
 const frequency = (lane: number, value: number) =>
-  1000 + (lane * 4 + value) * 250;
+  875 + (lane * 4 + value) * 125;
 export function encodeSound(frame: Uint8Array, rate: number): Float32Array {
   const parsed = parseFrame(frame);
   if (!parsed) throw new Error("Invalid sound frame.");
@@ -21,7 +21,8 @@ export function encodeSound(frame: Uint8Array, rate: number): Float32Array {
     const end = Math.round((s + 1) * SOUND_SYMBOL_SECONDS * rate);
     for (let i = begin; i < end; i++) {
       const t = (i - begin) / rate;
-      const ramp = Math.min(1, t / 0.0003, (end - i - 1) / (rate * 0.0003));
+      const edge = Math.min(1, t / 0.002, (end - i - 1) / (rate * 0.002));
+      const ramp = (1 - Math.cos(Math.PI * edge)) / 2;
       let sample = 0;
       for (let lane = 0; lane < 8; lane++)
         sample += Math.sin(
@@ -40,16 +41,21 @@ export class SoundDecoder {
   private readonly step: number;
   private readonly window: number;
   private readonly coefficients: number[];
+  private readonly taper: Float32Array;
   constructor(
     private rate: number,
     private onFrame: (frame: Uint8Array) => void,
     private onLevel: (level: number) => void = () => {},
   ) {
     this.step = Math.max(1, Math.round(rate * 0.001));
-    this.window = Math.round(rate * 0.004);
+    this.window = Math.round(rate * 0.012);
+    this.taper = Float32Array.from(
+      { length: this.window },
+      (_, i) => (1 - Math.cos((2 * Math.PI * i) / (this.window - 1))) / 2,
+    );
     this.coefficients = Array.from(
       { length: 32 },
-      (_, i) => 2 * Math.cos((2 * Math.PI * (1000 + i * 250)) / rate),
+      (_, i) => 2 * Math.cos((2 * Math.PI * (875 + i * 125)) / rate),
     );
   }
   clear() {
@@ -61,34 +67,42 @@ export class SoundDecoder {
     let word = 0,
       energy = 0;
     for (let i = 0; i < this.window; i++) energy += this.samples[at + i] ** 2;
-    if (energy / this.window < 0.000015) return -1;
+    // Only exact silence is amplitude-gated. Confidence below is dimensionless.
+    if (!(energy > 0)) return -1;
     for (let lane = 0; lane < 8; lane++) {
       let best = -1,
         second = -1,
-        value = 0;
+        value = 0,
+        total = 0;
       for (let v = 0; v < 4; v++) {
         const c = this.coefficients[lane * 4 + v];
         let a = 0,
           b = 0;
         for (let i = 0; i < this.window; i++) {
-          const next = this.samples[at + i] + c * a - b;
+          const next = this.samples[at + i] * this.taper[i] + c * a - b;
           b = a;
           a = next;
         }
         const power = a * a + b * b - c * a * b;
+        total += power;
         if (power > best) {
           second = best;
           best = power;
           value = v;
         } else second = Math.max(second, power);
       }
-      if (best < second * 2) return -1;
+      // Unselected matched bins estimate local interference/noise each symbol.
+      // Normalize by observed energy so microphone gain cannot alter confidence.
+      const normalization = this.window * energy;
+      const signal = best / normalization;
+      const noise = (total - best) / (3 * normalization);
+      if (signal < 0.0001 || signal < noise * 4 || best < second * 2) return -1;
       word |= value << (lane * 2);
     }
     return word;
   }
   push(chunk: Float32Array) {
-    // Retain at most one incomplete 144ms frame, independent of callback boundaries.
+    // Retain at most one incomplete 384ms frame, independent of callback boundaries.
     const joined = new Float32Array(
       this.samples.length - this.cursor + chunk.length,
     );

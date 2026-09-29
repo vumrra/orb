@@ -1,4 +1,5 @@
-import { FRAME_BYTES, parseFrame } from "./protocol";
+import { FRAME_BYTES } from "./protocol";
+import { rsEncode, rsDecode, parseOpticalFrame } from "./optical-fec";
 
 const TAU = Math.PI * 2;
 export const SYMBOL_MS = 140;
@@ -31,32 +32,19 @@ for (let row = -18; row <= 18; row++)
     )
       sites.push({ x, y });
   }
-const DATA_POSITIONS = [3, 5, 6, 7, 9, 10, 11, 12];
 function encode(frame: Uint8Array) {
-  const bits = new Uint8Array(FRAME_BYTES * 12);
-  for (let b = 0; b < FRAME_BYTES; b++) {
-    const word = new Uint8Array(13);
-    DATA_POSITIONS.forEach((p, i) => (word[p] = (frame[b] >> i) & 1));
-    for (const p of [1, 2, 4, 8])
-      for (let j = 1; j <= 12; j++) if (j & p) word[p] ^= word[j];
-    for (let j = 1; j <= 12; j++) bits[(j - 1) * FRAME_BYTES + b] = word[j];
-  }
-  return bits;
+  const code = rsEncode(frame);
+  return Uint8Array.from(
+    { length: 480 },
+    (_, i) => (code[i >> 3] >> (i & 7)) & 1,
+  );
 }
 function recover(bits: Uint8Array) {
-  const frame = new Uint8Array(FRAME_BYTES);
-  for (let b = 0; b < FRAME_BYTES; b++) {
-    const word = new Uint8Array(13);
-    let syndrome = 0;
-    for (let j = 1; j <= 12; j++) {
-      word[j] = bits[(j - 1) * FRAME_BYTES + b];
-      if (word[j]) syndrome ^= j;
-    }
-    if (syndrome > 12) return null;
-    if (syndrome) word[syndrome] ^= 1;
-    DATA_POSITIONS.forEach((p, i) => (frame[b] |= word[p] << i));
-  }
-  const parsed = parseFrame(frame);
+  const code = new Uint8Array(60);
+  for (let i = 0; i < 480; i++) code[i >> 3] |= bits[i] << (i & 7);
+  const frame = rsDecode(code);
+  if (!frame) return null;
+  const parsed = parseOpticalFrame(frame);
   parsed?.chunk.fill(0);
   return parsed ? frame : null;
 }
@@ -168,13 +156,13 @@ export function drawOptical(
   // Back-to-front splats accumulate premultiplied color and source-over alpha.
   for (const { x, y, z, scale: perspective, wave, i } of particles) {
     const depth = (z + 1) / 2;
-    const light = 50 + depth * (25 + 150 * wave ** 3);
+    const light = 50 + depth * (25 + (bits ? 90 : 150) * wave ** 3);
     // Dim currents still need enough optical energy to carry projected chroma.
     const opacity = (0.3 + 0.65 * depth) * (0.65 + 0.35 * wave * wave);
     let signal = bits ? bits[address(x, y) % bits.length] : 3;
     if (bits && pilots.some((p) => Math.hypot(x - p.x, y - p.y) < 0.064))
       signal = 2;
-    const amp = light * 0.1;
+    const amp = light * (signal === 2 ? 0.7 : 0.48);
     // Equal luminance axes: R-B encodes data, 2G-R-B encodes registration.
     const d = signal === 0 ? -amp : signal === 1 ? amp : 0,
       p = signal === 2 ? amp : 0;
@@ -260,7 +248,9 @@ type Geometry = {
   height: number;
 };
 function decodeValues(values: number[]) {
-  for (const threshold of [0, -0.025, 0.025, -0.05, 0.05, -0.075]) {
+  const sorted = values.slice().sort((a, b) => a - b);
+  const center = (sorted[120] + sorted[360]) / 2;
+  for (const threshold of [center, 0, center - 0.06, center + 0.06]) {
     const frame = recover(
       Uint8Array.from(values, (v) => (v > threshold ? 1 : 0)),
     );

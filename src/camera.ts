@@ -1,9 +1,11 @@
 import { OpticalTracker } from "./optical";
+import { OpticalRecovery } from "./optical-fec";
 import { BarCollector, scanBarPixels } from "./bar";
 export class Camera {
   private generation = 0;
   private fragments = new BarCollector();
   private optical = new OpticalTracker();
+  private recovery = new OpticalRecovery();
   private detected: "orb" | "bar" | null = null;
   private stream: MediaStream | null = null;
   private video: HTMLVideoElement | null = null;
@@ -13,6 +15,7 @@ export class Camera {
     this.generation++;
     this.fragments.clear();
     this.optical.clear();
+    this.recovery.clear();
     this.detected = null;
     cancelAnimationFrame(this.raf);
     this.raf = 0;
@@ -148,7 +151,16 @@ export class Camera {
             const frame = result.frame;
             if (frame) {
               try {
-                onFrame(frame);
+                const recovered =
+                  this.detected === "orb" ? this.recovery.add(frame) : [frame];
+                try {
+                  for (const data of recovered) {
+                    if (generation !== this.generation) break;
+                    onFrame(data);
+                  }
+                } finally {
+                  recovered.forEach((data) => data.fill(0));
+                }
               } finally {
                 frame.fill(0);
               }

@@ -10,7 +10,7 @@ function feed(decoder: SoundDecoder, pcm: Float32Array) {
   }
 }
 it.each([44100, 48000])(
-  "PCM at %i Hz carries 1000 original bytes in <10 seconds with offset/noise and arbitrary chunks",
+  "PCM at %i Hz carries 1000 original bytes in <22 seconds (narrow-band tradeoff) with offset/noise and arbitrary chunks",
   (rate) => {
     let seed = 42;
     const bytes = Uint8Array.from({ length: 1000 }, () => {
@@ -36,7 +36,9 @@ it.each([44100, 48000])(
     }
     expect(packet).toEqual(bytes);
     expect(1 / SOUND_SYMBOL_SECONDS).toBeGreaterThan(10);
-    expect(duration).toBeLessThan(10);
+    // 125Hz spacing and a 12ms tapered detector replace the harsh 250Hz-wide
+    // spacing. 16ms symbols cost 2.67x airtime versus the former 6ms mode.
+    expect(duration).toBeLessThan(22);
     console.log(
       JSON.stringify({
         soundRate: rate,
@@ -109,4 +111,107 @@ it("carries arbitrary v4 wide indices and final padding from a lazy 1MB source",
     decoder.clear();
   }
   source.clear();
+});
+
+it.each([44100, 48000])(
+  "quiet PCM at %i Hz remains decodable without raising transmit volume",
+  (rate) => {
+    const bytes = new TextEncoder().encode("quiet transmission 한글");
+    const collector = new Collector();
+    let packet: Uint8Array | null = null;
+    const decoder = new SoundDecoder(rate, (f) => {
+      packet = collector.add(f) ?? packet;
+    });
+    let seed = 19;
+    for (const frame of splitFrames(bytes)) {
+      const pcm = encodeSound(frame, rate);
+      for (let i = 0; i < pcm.length; i++) {
+        seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+        pcm[i] = pcm[i] * 0.025 + ((seed >>> 24) / 255 - 0.5) * 0.0002;
+      }
+      feed(decoder, pcm);
+    }
+    expect(packet).toEqual(bytes);
+  },
+);
+
+// Synthetic channel fixtures; these do not measure a physical room.
+function ambient(i: number, rate: number, random: number) {
+  const t = i / rate;
+  return (
+    0.006 * Math.sin(2 * Math.PI * 90 * t) +
+    0.0015 * Math.sin(2 * Math.PI * 180 * t) +
+    0.0008 * Math.sin(2 * Math.PI * 540 * t) +
+    0.00012 * Math.sin(2 * Math.PI * 2123 * t) +
+    0.0007 * random
+  );
+}
+it.each([44100, 48000])(
+  "weak PCM survives rumble, voiced harmonics, interference, noise and 2ms echo at %i Hz",
+  (rate) => {
+    const frames = splitFrames(
+      new TextEncoder().encode("weak sound with ambient noise"),
+    );
+    for (const gain of [0.1, 1, 10])
+      for (const noiseScale of [0.5, 1, 1.5]) {
+        const received: Uint8Array[] = [];
+        const decoder = new SoundDecoder(rate, (f) => received.push(f.slice()));
+        let seed = 91;
+        feed(decoder, new Float32Array(173));
+        for (const frame of frames) {
+          const clean = encodeSound(frame, rate);
+          const mixed = Float32Array.from(clean, (v, i) => {
+            seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+            return (
+              gain *
+              (0.025 * (v + 0.25 * (clean[i - Math.round(rate * 0.002)] ?? 0)) +
+                noiseScale * ambient(i, rate, seed / 4294967296 - 0.5))
+            );
+          });
+          feed(decoder, mixed);
+        }
+        expect(received).toEqual(frames);
+      }
+  },
+);
+it("accepts no frames from silence or standalone ambient noise at varied gain", () => {
+  let count = 0,
+    seed = 7;
+  const decoder = new SoundDecoder(48000, () => count++);
+  feed(decoder, new Float32Array(48000));
+  for (const gain of [0.01, 1, 10]) {
+    const noise = Float32Array.from({ length: 48000 }, (_, i) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return gain * ambient(i, 48000, seed / 4294967296 - 0.5);
+    });
+    feed(decoder, noise);
+  }
+  expect(count).toBe(0);
+});
+
+it("keeps high-frequency PCM energy low and smoothly enters each symbol", () => {
+  const rate = 48000;
+  const pcm = encodeSound(
+    splitFrames(new TextEncoder().encode("tone"))[0],
+    rate,
+  );
+  const n = Math.round(rate * SOUND_SYMBOL_SECONDS);
+  let high = 0,
+    total = 0;
+  // DFT of an actual preamble symbol, including its attack/release envelope.
+  for (let bin = 1; bin <= n / 2; bin++) {
+    let re = 0,
+      im = 0;
+    for (let i = 0; i < n; i++) {
+      re += pcm[i] * Math.cos((2 * Math.PI * bin * i) / n);
+      im += pcm[i] * Math.sin((2 * Math.PI * bin * i) / n);
+    }
+    const power = re * re + im * im;
+    total += power;
+    if ((bin * rate) / n > 6000) high += power;
+  }
+  expect(high / total).toBeLessThan(0.001);
+  expect(Math.abs(pcm[0])).toBe(0);
+  expect(Math.abs(pcm[1])).toBeLessThan(0.00003);
+  expect(Math.abs(pcm[n - 1])).toBe(0);
 });
