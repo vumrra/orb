@@ -1,4 +1,6 @@
-import { scanQr } from "./qr";
+import { scanQr, unpackQr } from "./qr";
+import { scanUltra, preloadUltraReader } from "./ultra-qr";
+import { parseBinaryPacket } from "./binary-transfer";
 import { OpticalTracker } from "./optical";
 import { OpticalRecovery } from "./optical-fec";
 import { BarCollector, BarTracker } from "./bar";
@@ -42,6 +44,7 @@ export class Camera {
     onError: (error: unknown) => void,
     onCandidate: (visible: boolean) => void = () => {},
     preferred: "auto" | "orb" | "bar" | "qr" = "auto",
+    options?: { ultra?: boolean; onBinary?: (packet: Uint8Array) => void },
   ): Promise<boolean> {
     this.stop();
     const generation = this.generation;
@@ -55,8 +58,8 @@ export class Camera {
       audio: false,
       video: {
         facingMode: { ideal: facing },
-        width: { ideal: 1280 },
-        height: { ideal: 1280 },
+        width: { ideal: options?.ultra ? 2048 : 1280 },
+        height: { ideal: options?.ultra ? 2048 : 1280 },
         frameRate: { ideal: 30 },
       },
     });
@@ -115,6 +118,86 @@ export class Camera {
             { once: true },
           ),
         );
+      if (options?.ultra) {
+        await preloadUltraReader();
+        if (generation !== this.generation) return false;
+        const tickUltra = async (time: number) => {
+          if (generation !== this.generation) return;
+          if (
+            !document.hidden &&
+            time - last >= interval &&
+            video.readyState >= 2 &&
+            video.videoWidth &&
+            video.videoHeight
+          ) {
+            last = time;
+            const began = performance.now();
+            let pixels: ImageData | undefined;
+            let packets: Uint8Array[] = [];
+            try {
+              const scale = Math.min(
+                1,
+                2048 / Math.max(video.videoWidth, video.videoHeight),
+              );
+              const width = Math.round(video.videoWidth * scale),
+                height = Math.round(video.videoHeight * scale);
+              if (canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
+              }
+              ctx.drawImage(video, 0, 0, width, height);
+              pixels = ctx.getImageData(0, 0, width, height);
+              packets = await scanUltra(pixels);
+              if (generation !== this.generation) return;
+              let visible = false;
+              // Manifest first allows a receiver to join any captured board.
+              packets.sort((a, b) => (a[4] ?? 0) - (b[4] ?? 0));
+              for (const packet of packets) {
+                if (generation !== this.generation) break;
+                if (parseBinaryPacket(packet)) {
+                  visible = true;
+                  options.onBinary?.(packet);
+                } else {
+                  const frames = unpackQr(packet);
+                  if (frames) {
+                    visible = true;
+                    try {
+                      for (const frame of frames) {
+                        if (generation !== this.generation) break;
+                        onFrame(frame);
+                      }
+                    } finally {
+                      frames.forEach((frame) => frame.fill(0));
+                    }
+                  }
+                }
+              }
+              if (visible) lastCandidate = time;
+              const nextCandidate = time - lastCandidate < 500;
+              if (
+                nextCandidate !== candidate &&
+                generation === this.generation
+              ) {
+                candidate = nextCandidate;
+                onCandidate(candidate);
+              }
+            } catch (error) {
+              fail(error);
+              return;
+            } finally {
+              // The async reader must finish consuming pixels before clearing them.
+              pixels?.data.fill(0);
+              packets.forEach((packet) => packet.fill(0));
+              interval = Math.max(25, (performance.now() - began) * 1.5);
+            }
+          }
+          // Exactly one decode in flight. Stop/reset cannot re-arm this pump.
+          if (generation === this.generation)
+            this.raf = requestAnimationFrame(tickUltra);
+        };
+        this.raf = requestAnimationFrame(tickUltra);
+        return true;
+      }
       const tick = (time: number) => {
         if (generation !== this.generation) return;
         if (

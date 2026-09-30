@@ -190,7 +190,7 @@ for (const width of [375, 768, 1440]) {
       .toBe(true);
     await expect(page.locator(".camera-shell")).toHaveCSS(
       "border-radius",
-      "50%",
+      "24px",
     );
     await page
       .getByRole("button", { name: "Switch to Orb", exact: true })

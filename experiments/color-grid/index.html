@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+  <meta charset="utf-8" /><meta
+    name="viewport"
+    content="width=device-width,initial-scale=1"
+  /><title>Orb — color-grid experiment</title
+  ><style>
+    body {
+      margin: 0;
+      background: #090a0b;
+      color: #e5e7eb;
+      font: 14px system-ui;
+    }
+    main {
+      max-width: 1100px;
+      margin: auto;
+      padding: 20px;
+    }
+    header {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    button,
+    select,
+    input {
+      background: #20242a;
+      color: inherit;
+      border: 1px solid #444c56;
+      border-radius: 16px;
+      padding: 10px;
+    }
+    button {
+      cursor: pointer;
+    }
+    canvas {
+      display: block;
+      max-width: 100%;
+      height: auto;
+      margin: 20px auto;
+      image-rendering: pixelated;
+    }
+    pre {
+      white-space: pre-wrap;
+      color: #c3cbd6;
+    }
+    small {
+      color: #9ba4b0;
+    }
+    a {
+      color: #afd5ff;
+    }
+    video {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+    }
+    h1 {
+      font-size: 18px;
+      font-weight: 500;
+    }
+  </style>
+  <main>
+    <h1>Color-grid experiment</h1>
+    <header>
+      <input id="file" type="file" /><select id="bits">
+        <option value="1">Monochrome</option>
+        <option value="2">4 colors</option>
+        <option value="3" selected>8 colors</option></select
+      ><button id="send">Send file</button
+      ><button id="receive">Receive camera</button
+      ><button id="bench">10 MB loopback</button><button id="stop">Stop</button>
+    </header>
+    <p>
+      <small
+        >Experimental. Near-front-facing capture only. Existing Orb modes are
+        unchanged. Camera requires HTTPS or localhost.</small
+      >
+    </p>
+    <pre id="status">Ready</pre>
+    <a id="download" hidden>Download verified bytes</a
+    ><canvas id="board" width="780" height="810"></canvas
+    ><video id="video" muted playsinline></video>
+  </main>
+  <script type="module" src="./app.mjs"></script>
+</html>

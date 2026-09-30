@@ -4,6 +4,16 @@ import { Orb } from "./Orb";
 import { Camera, cameraError } from "./camera";
 import { Sound, soundError } from "./sound-runtime";
 import {
+  BinaryCollector,
+  createBinarySource,
+  MAX_FILE_BYTES,
+  type BinarySource,
+  type VerifiedTransfer,
+} from "./binary-transfer";
+import { UltraBoard } from "./UltraBoard";
+import { VerifiedFile } from "./VerifiedFile";
+import { preloadUltraReader } from "./ultra-qr";
+import {
   Collector,
   createWireFrames,
   MAX_TEXT_BYTES,
@@ -131,6 +141,16 @@ export function App() {
   const [transport, setTransport] = useState<"orb" | "bar" | "sound" | "qr">(
     "orb",
   );
+  const [ultra, setUltra] = useState(false);
+  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [binarySource, setBinarySource] = useState<BinarySource | null>(null);
+  const [receivedFile, setReceivedFile] = useState<VerifiedTransfer | null>(
+    null,
+  );
+  const binaryStore = useRef<BinarySource | null>(null);
+  const fileStore = useRef<VerifiedTransfer | null>(null);
+  const binaryCollector = useRef(new BinaryCollector());
+  const fileInput = useRef<HTMLInputElement>(null);
   const [mode, setMode] = useState<Mode>("send");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [phase, setPhase] = useState<Phase>("idle");
@@ -186,6 +206,9 @@ export function App() {
       sound.current.stop();
       collector.current.clear();
       frameStore.current.clear();
+      binaryStore.current?.clear();
+      binaryCollector.current.clear();
+      fileStore.current?.bytes.fill(0);
       cancelJobs();
     };
   }, []);
@@ -197,6 +220,14 @@ export function App() {
     collector.current.clear();
     frameStore.current.clear();
     cancelJobs();
+    binaryStore.current?.clear();
+    binaryStore.current = null;
+    binaryCollector.current.clear();
+    fileStore.current?.bytes.fill(0);
+    fileStore.current = null;
+    setBinarySource(null);
+    setReceivedFile(null);
+    setSelectedFile(null);
     frameStore.current = NO_FRAMES;
     setFrames(NO_FRAMES);
     if (!keepText) setText("");
@@ -211,7 +242,13 @@ export function App() {
   }
 
   async function send() {
-    if (!byteCount || byteCount > MAX_TEXT_BYTES || phase !== "idle") return;
+    if (phase !== "idle") return;
+    if (
+      selectedFile
+        ? selectedFile.size > MAX_FILE_BYTES
+        : !byteCount || byteCount > MAX_TEXT_BYTES
+    )
+      return;
     const token = ++generation.current;
     const controller = new AbortController();
     job.current = controller;
@@ -221,6 +258,29 @@ export function App() {
     try {
       if (transport === "sound" && !(await sound.current.open())) return;
       if (token !== generation.current) return;
+      if (transport === "qr" && ultra) {
+        packet = selectedFile
+          ? new Uint8Array(await selectedFile.arrayBuffer())
+          : new TextEncoder().encode(text);
+        controller.signal.throwIfAborted();
+        const source = await createBinarySource(
+          packet,
+          selectedFile
+            ? { name: selectedFile.name, mime: selectedFile.type, kind: "file" }
+            : { name: "message.txt", mime: "text/plain", kind: "text" },
+          controller.signal,
+        );
+        if (token !== generation.current) {
+          source.clear();
+          return;
+        }
+        binaryStore.current = source;
+        setBinarySource(source);
+        setSelectedFile(null);
+        setText("");
+        setPhase("broadcasting");
+        return;
+      }
       packet = await prepareMessage(text, controller.signal);
       if (token !== generation.current) return;
       const result = createWireFrames(packet);
@@ -252,6 +312,8 @@ export function App() {
     if (phase !== "idle" || (transport !== "sound" && !video.current)) return;
     const token = ++generation.current;
     let completed = false;
+    let acquired: "binary" | "legacy" | null = null;
+    binaryCollector.current.clear();
     collector.current.clear();
     setReceived("");
     setCandidate(false);
@@ -265,6 +327,7 @@ export function App() {
       camera.current.stop();
       sound.current.stop();
       collector.current.clear();
+      binaryCollector.current.clear();
       setReceived("");
       setCandidate(false);
       setProgress({ count: 0, total: 0 });
@@ -273,8 +336,10 @@ export function App() {
     };
     try {
       const onFrame = (frame: Uint8Array) => {
-        if (token !== generation.current || completed) return;
+        if (token !== generation.current || completed || acquired === "binary")
+          return;
         const packet = collector.current.add(frame);
+        if (collector.current.total) acquired = "legacy";
         const flush = () => {
           updateTimer.current = null;
           if (token !== generation.current) return;
@@ -310,6 +375,54 @@ export function App() {
             if (token === generation.current) job.current = null;
           });
       };
+      const onBinary = (bytes: Uint8Array) => {
+        if (token !== generation.current || completed || acquired === "legacy")
+          return;
+        const ready = binaryCollector.current.add(bytes);
+        if (binaryCollector.current.total || ready) acquired = "binary";
+        const flush = () => {
+          updateTimer.current = null;
+          if (token === generation.current)
+            setProgress({
+              count: binaryCollector.current.count,
+              total: binaryCollector.current.total,
+            });
+        };
+        if (!ready) {
+          if (updateTimer.current === null)
+            updateTimer.current = setTimeout(flush, 100);
+          return;
+        }
+        completed = true;
+        if (updateTimer.current !== null) clearTimeout(updateTimer.current);
+        flush();
+        camera.current.stop();
+        setPhase("decoding");
+        void binaryCollector.current
+          .verify()
+          .then((result) => {
+            if (token !== generation.current) {
+              result.bytes.fill(0);
+              return;
+            }
+            if (result.meta.kind === "text") {
+              try {
+                setReceived(
+                  new TextDecoder("utf-8", { fatal: true }).decode(
+                    result.bytes,
+                  ),
+                );
+              } finally {
+                result.bytes.fill(0);
+              }
+            } else {
+              fileStore.current = result;
+              setReceivedFile(result);
+            }
+            setPhase("received");
+          })
+          .catch(fail);
+      };
       const onCandidate = (visible: boolean) => {
         if (token === generation.current && !completed) setCandidate(visible);
       };
@@ -323,6 +436,9 @@ export function App() {
               fail,
               onCandidate,
               transport,
+              transport === "qr" && ultra
+                ? { ultra: true, onBinary }
+                : undefined,
             );
       if (started && token === generation.current && !completed)
         setPhase("scanning");
@@ -498,16 +614,26 @@ export function App() {
         </nav>
         <div className="light-stage">
           <div
-            className={`orb-stage ${mode === "receive" && transport !== "sound" && phase !== "received" ? "camera-shell" : ""} ${inCamera ? "camera-active" : ""} ${inCamera && candidate ? "is-candidate" : ""} ${phase === "received" ? "is-received" : ""}`}
+            className={`orb-stage ${binarySource ? "ultra-stage" : ""} ${mode === "receive" && transport !== "sound" && phase !== "received" ? "camera-shell" : ""} ${inCamera ? "camera-active" : ""} ${inCamera && candidate ? "is-candidate" : ""} ${phase === "received" ? "is-received" : ""}`}
             data-camera-state={phase}
           >
-            <Orb
-              frames={frames}
-              reduced={reduced}
-              still={inCamera}
-              transport={transport}
-              meter={sound.current.meter}
-            />
+            {binarySource ? (
+              <UltraBoard
+                source={binarySource}
+                onError={(reason) => {
+                  reset();
+                  setError(cameraError(reason));
+                }}
+              />
+            ) : (
+              <Orb
+                frames={frames}
+                reduced={reduced}
+                still={inCamera}
+                transport={transport}
+                meter={sound.current.meter}
+              />
+            )}
             <video
               ref={video}
               className="camera-video"
@@ -586,13 +712,21 @@ export function App() {
                   />
                 </div>
               </div>
-              <pre
-                aria-label="Received message"
-                aria-live="polite"
-                aria-atomic="true"
-              >
-                <ReceivedText text={received} />
-              </pre>
+              {receivedFile ? (
+                <VerifiedFile
+                  file={receivedFile}
+                  reduced={reduced}
+                  theme={theme}
+                />
+              ) : (
+                <pre
+                  aria-label="Received message"
+                  aria-live="polite"
+                  aria-atomic="true"
+                >
+                  <ReceivedText text={received} />
+                </pre>
+              )}
             </div>
           )}
         </div>
@@ -608,21 +742,23 @@ export function App() {
         >
           {phase === "received" ? (
             <>
-              <div className="result-actions">
-                <button className="secondary" onClick={() => void copy()}>
-                  {copied ? "Copied" : "Copy message"}
-                </button>
-                <button
-                  className="secondary"
-                  onClick={() => {
-                    const message = received;
-                    reset("send");
-                    setText(message);
-                  }}
-                >
-                  Send again <Arrow />
-                </button>
-              </div>
+              {!receivedFile && (
+                <div className="result-actions">
+                  <button className="secondary" onClick={() => void copy()}>
+                    {copied ? "Copied" : "Copy message"}
+                  </button>
+                  <button
+                    className="secondary"
+                    onClick={() => {
+                      const message = received;
+                      reset("send");
+                      setText(message);
+                    }}
+                  >
+                    Send again <Arrow />
+                  </button>
+                </div>
+              )}
               <button className="quiet-button" onClick={() => reset()}>
                 Reset
               </button>
@@ -633,7 +769,7 @@ export function App() {
                 <span className="live-dot" />
                 {transport === "sound" ? "Acoustic stream" : "Optical stream"}
               </div>
-              <Primary reduced={reduced} onClick={() => reset()}>
+              <Primary reduced={true} onClick={() => reset()}>
                 Stop sending <span aria-hidden="true">×</span>
               </Primary>
             </>
@@ -650,7 +786,7 @@ export function App() {
                       setText(event.target.value);
                       setError("");
                     }}
-                    disabled={locked}
+                    disabled={locked || !!selectedFile}
                     spellCheck={false}
                     autoComplete="off"
                     autoCorrect="off"
@@ -692,10 +828,11 @@ export function App() {
                   </div>
                 )}
               <Primary
-                reduced={reduced}
+                reduced={reduced || locked}
                 disabled={
                   locked ||
                   (mode === "send" &&
+                    !selectedFile &&
                     (!byteCount || byteCount > MAX_TEXT_BYTES))
                 }
                 onClick={() => void (mode === "send" ? send() : startCamera())}
@@ -733,6 +870,94 @@ export function App() {
             </p>
           )}
         </section>
+        {transport === "qr" && (
+          <div className="qr-options">
+            <MetalFx
+              preset="silver"
+              theme={theme}
+              paused={reduced || locked}
+              normalizeHostStyles={false}
+              className="metal-action"
+            >
+              <button
+                className="secondary ultra-switch"
+                role="switch"
+                aria-checked={ultra}
+                disabled={locked}
+                onClick={() => {
+                  const enabled = !ultra;
+                  reset(mode, true);
+                  setUltra(enabled);
+                  if (enabled) {
+                    const token = generation.current;
+                    void preloadUltraReader().catch((reason) => {
+                      if (token === generation.current) {
+                        setUltra(false);
+                        setError(cameraError(reason));
+                      }
+                    });
+                  }
+                }}
+              >
+                Ultrafast <span aria-hidden="true">{ultra ? "On" : "Off"}</span>
+              </button>
+            </MetalFx>
+            {ultra && mode === "send" && phase === "idle" && (
+              <>
+                <input
+                  ref={fileInput}
+                  className="local-file-input"
+                  type="file"
+                  aria-label="Choose local file"
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    if (!file) return;
+                    setError("");
+                    if (file.size > MAX_FILE_BYTES) {
+                      setSelectedFile(null);
+                      setError("Files must be at most 30,000,000 bytes.");
+                      return;
+                    }
+                    setSelectedFile(file);
+                  }}
+                />
+                <MetalFx
+                  preset="silver"
+                  theme={theme}
+                  paused={reduced || locked}
+                  normalizeHostStyles={false}
+                  className="metal-action"
+                >
+                  <button
+                    type="button"
+                    className="secondary upload-button"
+                    onClick={() => fileInput.current?.click()}
+                  >
+                    Choose file
+                  </button>
+                </MetalFx>
+                {selectedFile && (
+                  <div className="selected-file">
+                    <span>
+                      {selectedFile.name} ·{" "}
+                      {selectedFile.size.toLocaleString("en-US")} bytes
+                    </span>
+                    <button
+                      className="quiet-button"
+                      onClick={() => setSelectedFile(null)}
+                    >
+                      Remove file
+                    </button>
+                  </div>
+                )}
+                <p className="file-note">
+                  Local files · up to 30 MB · camera transfer
+                </p>
+              </>
+            )}
+          </div>
+        )}
       </main>
     </div>
   );
