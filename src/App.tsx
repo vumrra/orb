@@ -9,10 +9,18 @@ import {
   MAX_FILE_BYTES,
   type BinarySource,
   type VerifiedTransfer,
+  type TransferMeta,
 } from "./binary-transfer";
 import { UltraBoard } from "./UltraBoard";
 import { VerifiedFile } from "./VerifiedFile";
-import { preloadUltraReader } from "./ultra-qr";
+import { ColorBoard } from "./ColorBoard";
+import {
+  ColorCollector,
+  createColorSource,
+  colorGridForViewport,
+  type ColorSource,
+} from "./color-grid";
+import { UltraReceiveEffects } from "./UltraReceiveEffects";
 import {
   Collector,
   createWireFrames,
@@ -141,7 +149,12 @@ export function App() {
   const [transport, setTransport] = useState<"orb" | "bar" | "sound" | "qr">(
     "orb",
   );
-  const [ultra, setUltra] = useState(false);
+  const shell = useRef<HTMLDivElement>(null);
+  const [speed, setSpeed] = useState<"fast" | "ultrafast">("fast");
+  const ultra = speed === "ultrafast";
+  const [colorSource, setColorSource] = useState<ColorSource | null>(null);
+  const colorStore = useRef<ColorSource | null>(null);
+  const colorCollector = useRef(new ColorCollector());
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [binarySource, setBinarySource] = useState<BinarySource | null>(null);
   const [receivedFile, setReceivedFile] = useState<VerifiedTransfer | null>(
@@ -207,7 +220,9 @@ export function App() {
       collector.current.clear();
       frameStore.current.clear();
       binaryStore.current?.clear();
+      colorStore.current?.clear();
       binaryCollector.current.clear();
+      colorCollector.current.clear();
       fileStore.current?.bytes.fill(0);
       cancelJobs();
     };
@@ -222,7 +237,11 @@ export function App() {
     cancelJobs();
     binaryStore.current?.clear();
     binaryStore.current = null;
+    colorStore.current?.clear();
+    colorStore.current = null;
+    setColorSource(null);
     binaryCollector.current.clear();
+    colorCollector.current.clear();
     fileStore.current?.bytes.fill(0);
     fileStore.current = null;
     setBinarySource(null);
@@ -258,24 +277,44 @@ export function App() {
     try {
       if (transport === "sound" && !(await sound.current.open())) return;
       if (token !== generation.current) return;
-      if (transport === "qr" && ultra) {
+      if (transport === "qr") {
         packet = selectedFile
           ? new Uint8Array(await selectedFile.arrayBuffer())
           : new TextEncoder().encode(text);
         controller.signal.throwIfAborted();
-        const source = await createBinarySource(
-          packet,
-          selectedFile
-            ? { name: selectedFile.name, mime: selectedFile.type, kind: "file" }
-            : { name: "message.txt", mime: "text/plain", kind: "text" },
-          controller.signal,
-        );
-        if (token !== generation.current) {
-          source.clear();
-          return;
+        const meta: TransferMeta = selectedFile
+          ? { name: selectedFile.name, mime: selectedFile.type, kind: "file" }
+          : { name: "message.txt", mime: "text/plain", kind: "text" };
+        if (ultra) {
+          const grid = colorGridForViewport(
+            Math.min(innerWidth, shell.current?.clientWidth ?? innerWidth) - 40,
+            innerHeight - 300,
+          );
+          const source = await createColorSource(
+            packet,
+            meta,
+            controller.signal,
+            grid,
+          );
+          if (token !== generation.current) {
+            source.clear();
+            return;
+          }
+          colorStore.current = source;
+          setColorSource(source);
+        } else {
+          const source = await createBinarySource(
+            packet,
+            meta,
+            controller.signal,
+          );
+          if (token !== generation.current) {
+            source.clear();
+            return;
+          }
+          binaryStore.current = source;
+          setBinarySource(source);
         }
-        binaryStore.current = source;
-        setBinarySource(source);
         setSelectedFile(null);
         setText("");
         setPhase("broadcasting");
@@ -313,7 +352,11 @@ export function App() {
     const token = ++generation.current;
     let completed = false;
     let acquired: "binary" | "legacy" | null = null;
+    const fileCollector = ultra
+      ? colorCollector.current
+      : binaryCollector.current;
     binaryCollector.current.clear();
+    colorCollector.current.clear();
     collector.current.clear();
     setReceived("");
     setCandidate(false);
@@ -328,6 +371,7 @@ export function App() {
       sound.current.stop();
       collector.current.clear();
       binaryCollector.current.clear();
+      colorCollector.current.clear();
       setReceived("");
       setCandidate(false);
       setProgress({ count: 0, total: 0 });
@@ -378,14 +422,14 @@ export function App() {
       const onBinary = (bytes: Uint8Array) => {
         if (token !== generation.current || completed || acquired === "legacy")
           return;
-        const ready = binaryCollector.current.add(bytes);
-        if (binaryCollector.current.total || ready) acquired = "binary";
+        const ready = fileCollector.add(bytes);
+        if (fileCollector.total || ready) acquired = "binary";
         const flush = () => {
           updateTimer.current = null;
           if (token === generation.current)
             setProgress({
-              count: binaryCollector.current.count,
-              total: binaryCollector.current.total,
+              count: fileCollector.count,
+              total: fileCollector.total,
             });
         };
         if (!ready) {
@@ -398,7 +442,7 @@ export function App() {
         flush();
         camera.current.stop();
         setPhase("decoding");
-        void binaryCollector.current
+        void fileCollector
           .verify()
           .then((result) => {
             if (token !== generation.current) {
@@ -436,8 +480,10 @@ export function App() {
               fail,
               onCandidate,
               transport,
-              transport === "qr" && ultra
-                ? { ultra: true, onBinary }
+              transport === "qr"
+                ? ultra
+                  ? { color: true, onColor: onBinary }
+                  : { ultra: true, onBinary }
                 : undefined,
             );
       if (started && token === generation.current && !completed)
@@ -493,7 +539,17 @@ export function App() {
             : "";
 
   return (
-    <div className="app-shell" data-theme={theme} data-transport={transport}>
+    <div
+      ref={shell}
+      className="app-shell"
+      data-theme={theme}
+      data-transport={transport}
+      data-speed={transport === "qr" ? speed : undefined}
+    >
+      {transport === "qr" &&
+        ultra &&
+        mode === "receive" &&
+        phase !== "received" && <UltraReceiveEffects reduced={reduced} />}
       <header className="header">
         <button
           className="wordmark"
@@ -614,10 +670,18 @@ export function App() {
         </nav>
         <div className="light-stage">
           <div
-            className={`orb-stage ${binarySource ? "ultra-stage" : ""} ${mode === "receive" && transport !== "sound" && phase !== "received" ? "camera-shell" : ""} ${inCamera ? "camera-active" : ""} ${inCamera && candidate ? "is-candidate" : ""} ${phase === "received" ? "is-received" : ""}`}
+            className={`orb-stage ${binarySource ? "ultra-stage" : colorSource ? "color-stage" : ""} ${transport === "qr" && ultra && mode === "receive" && phase !== "received" ? "ultra-receive" : ""} ${mode === "receive" && transport !== "sound" && phase !== "received" ? "camera-shell" : ""} ${inCamera ? "camera-active" : ""} ${inCamera && candidate ? "is-candidate" : ""} ${phase === "received" ? "is-received" : ""}`}
             data-camera-state={phase}
           >
-            {binarySource ? (
+            {colorSource ? (
+              <ColorBoard
+                source={colorSource}
+                onError={(reason) => {
+                  reset();
+                  setError(cameraError(reason));
+                }}
+              />
+            ) : binarySource ? (
               <UltraBoard
                 source={binarySource}
                 onError={(reason) => {
@@ -872,37 +936,26 @@ export function App() {
         </section>
         {transport === "qr" && (
           <div className="qr-options">
-            <MetalFx
-              preset="silver"
-              theme={theme}
-              paused={reduced || locked}
-              normalizeHostStyles={false}
-              className="metal-action"
-            >
-              <button
-                className="secondary ultra-switch"
-                role="switch"
-                aria-checked={ultra}
-                disabled={locked}
-                onClick={() => {
-                  const enabled = !ultra;
-                  reset(mode, true);
-                  setUltra(enabled);
-                  if (enabled) {
-                    const token = generation.current;
-                    void preloadUltraReader().catch((reason) => {
-                      if (token === generation.current) {
-                        setUltra(false);
-                        setError(cameraError(reason));
-                      }
-                    });
-                  }
-                }}
-              >
-                Ultrafast <span aria-hidden="true">{ultra ? "On" : "Off"}</span>
-              </button>
-            </MetalFx>
-            {ultra && mode === "send" && phase === "idle" && (
+            <div className="speed-switch" role="group" aria-label="QR speed">
+              {(["fast", "ultrafast"] as const).map((nextSpeed) => (
+                <button
+                  key={nextSpeed}
+                  type="button"
+                  aria-pressed={speed === nextSpeed}
+                  disabled={locked}
+                  onClick={() => {
+                    if (speed === nextSpeed) return;
+                    const file = selectedFile;
+                    reset(mode, true);
+                    setSpeed(nextSpeed);
+                    setSelectedFile(file);
+                  }}
+                >
+                  {nextSpeed === "fast" ? "Fast" : "Ultrafast"}
+                </button>
+              ))}
+            </div>
+            {mode === "send" && phase === "idle" && (
               <>
                 <input
                   ref={fileInput}

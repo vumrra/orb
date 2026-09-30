@@ -38,7 +38,7 @@ async function twoApps(page) {
 async function cameraBridge(page, loss = false) {
   await page.evaluate((loss) => {
     const source = document.querySelector(
-      "#root .ultra-canvas, #root .qr-canvas",
+      "#root .color-canvas, #root .ultra-canvas, #root .qr-canvas",
     );
     Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
       configurable: true,
@@ -72,17 +72,18 @@ test("QR-only switch, compact off geometry, local files, limits, reset, and squa
 }) => {
   await page.setViewportSize({ width: 375, height: 950 });
   await page.goto("/");
-  await expect(page.getByRole("switch", { name: "Ultrafast" })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Fast", exact: true }),
+  ).toHaveCount(0);
   const baseline = await page.locator(".orb-stage").boundingBox();
   await selectQr(page);
   expect((await page.locator(".orb-stage").boundingBox()).width).toBe(
     baseline.width,
   );
-  await expect(page.getByRole("switch", { name: "Ultrafast" })).toHaveAttribute(
-    "aria-checked",
-    "false",
-  );
-  await page.getByRole("switch", { name: "Ultrafast" }).click();
+  await expect(
+    page.getByRole("button", { name: "Fast", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
+  await page.getByRole("button", { name: "Fast", exact: true }).click();
   await page.getByLabel("Choose local file").setInputFiles({
     name: "unknown",
     mimeType: "",
@@ -144,8 +145,8 @@ for (const kind of ["binary", "image"])
       });
     page.on("request", (r) => network.push(r.url()));
     const { sender, receiver } = await twoApps(page);
-    await sender.getByRole("switch", { name: "Ultrafast" }).click();
-    await receiver.getByRole("switch", { name: "Ultrafast" }).click();
+    await sender.getByRole("button", { name: "Fast", exact: true }).click();
+    await receiver.getByRole("button", { name: "Fast", exact: true }).click();
     const bytes =
       kind === "binary"
         ? randomBytes(65536)
@@ -257,7 +258,7 @@ test("ultrafast late permission cannot restart after mode switch", async ({
 }) => {
   await page.goto("/");
   await selectQr(page);
-  await page.getByRole("switch", { name: "Ultrafast" }).click();
+  await page.getByRole("button", { name: "Fast", exact: true }).click();
   await page.getByRole("button", { name: "Receive", exact: true }).click();
   await page.evaluate(() =>
     Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
@@ -284,7 +285,7 @@ test("ultrafast late permission cannot restart after mode switch", async ({
     page.getByRole("button", { name: "Create qr", exact: true }),
   ).toBeVisible();
 });
-test("normal QR versus ultrafast same uncompressed text fixture", async ({
+test("Fast versus Ultrafast same uncompressed text fixture", async ({
   page,
 }) => {
   test.setTimeout(90000);
@@ -302,8 +303,12 @@ test("normal QR versus ultrafast same uncompressed text fixture", async ({
     times = {};
   for (const ultra of [false, true]) {
     if (ultra) {
-      await sender.getByRole("switch", { name: "Ultrafast" }).click();
-      await receiver.getByRole("switch", { name: "Ultrafast" }).click();
+      await sender
+        .getByRole("button", { name: "Ultrafast", exact: true })
+        .click();
+      await receiver
+        .getByRole("button", { name: "Ultrafast", exact: true })
+        .click();
     }
     await sender.getByLabel("Your message").fill(text);
     await sender
@@ -325,7 +330,7 @@ test("normal QR versus ultrafast same uncompressed text fixture", async ({
         .getByLabel("Received message", { exact: true })
         .textContent(),
     ).toBe(text);
-    times[ultra ? "ultraMs" : "normalMs"] = Date.now() - start;
+    times[ultra ? "ultraMs" : "fastMs"] = Date.now() - start;
     await sender
       .getByRole("button", { name: "Stop sending", exact: true })
       .click();
@@ -335,7 +340,7 @@ test("normal QR versus ultrafast same uncompressed text fixture", async ({
     JSON.stringify({
       sameFixtureBytes: 8192,
       ...times,
-      speedup: times.normalMs / times.ultraMs,
+      speedup: times.fastMs / times.ultraMs,
     }),
   );
 });

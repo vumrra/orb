@@ -4,12 +4,14 @@ import { parseBinaryPacket } from "./binary-transfer";
 import { OpticalTracker } from "./optical";
 import { OpticalRecovery } from "./optical-fec";
 import { BarCollector, BarTracker } from "./bar";
+import { ColorTracker } from "./color-scan";
 export class Camera {
   private generation = 0;
   private fragments = new BarCollector();
   private bar = new BarTracker();
   private optical = new OpticalTracker();
   private recovery = new OpticalRecovery();
+  private color = new ColorTracker();
   private detected: "orb" | "bar" | "qr" | null = null;
   private stream: MediaStream | null = null;
   private video: HTMLVideoElement | null = null;
@@ -21,6 +23,7 @@ export class Camera {
     this.bar.clear();
     this.optical.clear();
     this.recovery.clear();
+    this.color.clear();
     this.detected = null;
     cancelAnimationFrame(this.raf);
     this.raf = 0;
@@ -44,7 +47,12 @@ export class Camera {
     onError: (error: unknown) => void,
     onCandidate: (visible: boolean) => void = () => {},
     preferred: "auto" | "orb" | "bar" | "qr" = "auto",
-    options?: { ultra?: boolean; onBinary?: (packet: Uint8Array) => void },
+    options?: {
+      ultra?: boolean;
+      onBinary?: (packet: Uint8Array) => void;
+      color?: boolean;
+      onColor?: (packet: Uint8Array) => void;
+    },
   ): Promise<boolean> {
     this.stop();
     const generation = this.generation;
@@ -58,9 +66,9 @@ export class Camera {
       audio: false,
       video: {
         facingMode: { ideal: facing },
-        width: { ideal: options?.ultra ? 2048 : 1280 },
-        height: { ideal: options?.ultra ? 2048 : 1280 },
-        frameRate: { ideal: 30 },
+        width: { ideal: options?.ultra || options?.color ? 2048 : 1280 },
+        height: { ideal: options?.ultra || options?.color ? 2048 : 1280 },
+        frameRate: { ideal: options?.color ? 60 : 30 },
       },
     });
     if (generation !== this.generation) {
@@ -118,6 +126,68 @@ export class Camera {
             { once: true },
           ),
         );
+      if (options?.color) {
+        interval = 1000 / 60 - 0.5;
+        let scanning = false;
+        const tickColor = async (time: number) => {
+          if (generation !== this.generation || scanning) return;
+          if (
+            !document.hidden &&
+            time - last >= interval &&
+            video.readyState >= 2 &&
+            video.videoWidth &&
+            video.videoHeight
+          ) {
+            scanning = true;
+            last = time;
+            const began = performance.now();
+            let pixels: ImageData | undefined;
+            let packet: Uint8Array | null = null;
+            try {
+              const scale = Math.min(
+                1,
+                2048 / Math.max(video.videoWidth, video.videoHeight),
+              );
+              const width = Math.round(video.videoWidth * scale),
+                height = Math.round(video.videoHeight * scale);
+              if (canvas.width !== width || canvas.height !== height) {
+                canvas.width = width;
+                canvas.height = height;
+              }
+              ctx.drawImage(video, 0, 0, width, height);
+              pixels = ctx.getImageData(0, 0, width, height);
+              packet = await this.color.scan(pixels);
+              if (generation !== this.generation) return;
+              // Only a bounds/CRC-validated packet confirms a visible carrier.
+              if (packet) {
+                lastCandidate = time;
+                options.onColor?.(packet);
+              }
+              const visible = time - lastCandidate < 500;
+              if (visible !== candidate && generation === this.generation) {
+                candidate = visible;
+                onCandidate(visible);
+              }
+            } catch (error) {
+              fail(error);
+              return;
+            } finally {
+              pixels?.data.fill(0);
+              packet?.fill(0);
+              ctx.clearRect(0, 0, canvas.width, canvas.height);
+              scanning = false;
+              interval = Math.max(
+                1000 / 60 - 0.5,
+                (performance.now() - began) * 1.1,
+              );
+            }
+          }
+          if (generation === this.generation)
+            this.raf = requestAnimationFrame(tickColor);
+        };
+        this.raf = requestAnimationFrame(tickColor);
+        return true;
+      }
       if (options?.ultra) {
         await preloadUltraReader();
         if (generation !== this.generation) return false;

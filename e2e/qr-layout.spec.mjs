@@ -14,7 +14,8 @@ for (const width of [375, 768, 1440]) {
               x: r.x,
               y: r.y,
               width: r.width,
-              height: r.height,
+              // Fast 파일 선택 영역은 아래에 추가되지만 기존 상단 배치는 유지합니다.
+              height: selector === ".main" ? undefined : r.height,
             };
           },
         ),
@@ -40,10 +41,11 @@ for (const width of [375, 768, 1440]) {
       .getByLabel("Your message")
       .fill("QR layout and readable quiet zone");
     await page.getByRole("button", { name: "Create qr", exact: true }).click();
-    await expect(page.locator(".qr-canvas")).toHaveCSS("border-radius", "20px");
-    expect((await page.locator(".orb-stage").boundingBox()).width).toBe(
-      baseline[2].width,
-    );
+    await expect(page.locator(".ultra-canvas")).toBeVisible();
+    await expect(page.locator(".orb-stage")).toHaveCSS("border-radius", "20px");
+    expect(
+      (await page.locator(".orb-stage").boundingBox()).width,
+    ).toBeLessThanOrEqual(width - 40);
     await page.screenshot({ path: `/tmp/orb-qr-refined-dark-${width}.png` });
     await page.getByRole("button", { name: "Light mode", exact: true }).click();
     await expect(page.locator(".wordmark")).toHaveCSS(

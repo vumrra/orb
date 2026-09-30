@@ -76,7 +76,7 @@ export function UltraBoard({
     <canvas
       ref={canvas}
       className="ultra-canvas"
-      aria-label="Ultrafast QR transfer board"
+      aria-label="Fast QR transfer board"
     />
   );
 }

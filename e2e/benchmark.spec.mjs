@@ -1,7 +1,8 @@
 import { test, expect } from "@playwright/test";
 
 // Identical payload, viewport, motion preference and start/end boundary for all modes.
-// Optical: actual sender pixels at 600px in a 1024x720 captureStream camera.
+// Optical: 600px Orb/Bar; Fast QR keeps native pixels (at least 3px/module).
+// All optical modes use a 1024x720 captureStream camera.
 // Sound: actual sender AudioBuffers looped into the microphone, no speaker output.
 for (const transport of ["orb", "bar", "sound", "qr"]) {
   test(`benchmark ${transport}: 1000 uncompressed bytes`, async ({ page }) => {
@@ -46,6 +47,9 @@ for (const transport of ["orb", "bar", "sound", "qr"]) {
     const cycle = ["orb", "bar", "sound", "qr"];
     for (let i = 1; i <= cycle.indexOf(transport); i++)
       await sender.locator(".wordmark").click();
+    if (transport === "qr") {
+      for (let i = 0; i < 3; i++) await receiver.locator(".wordmark").click();
+    }
     if (transport === "sound") {
       await receiver.locator(".wordmark").click();
       await receiver.locator(".wordmark").click();
@@ -61,7 +65,9 @@ for (const transport of ["orb", "bar", "sound", "qr"]) {
             window.__benchmarkStream = window.__benchmarkStreams[0].clone();
             return window.__benchmarkStream;
           }
-          const source = document.querySelector("#root .orb-canvas");
+          const source = document.querySelector(
+            "#root .ultra-canvas, #root .orb-canvas",
+          );
           const output = document.createElement("canvas");
           output.width = 1024;
           output.height = 720;
@@ -76,7 +82,13 @@ for (const transport of ["orb", "bar", "sound", "qr"]) {
               return;
             ctx.fillStyle = "#090909";
             ctx.fillRect(0, 0, 1024, 720);
-            ctx.drawImage(source, 390, 110, 600, 600);
+            if (mode === "qr") {
+              ctx.drawImage(
+                source,
+                (1024 - source.width) / 2,
+                (720 - source.height) / 2,
+              );
+            } else ctx.drawImage(source, 390, 110, 600, 600);
             requestAnimationFrame(paint);
           };
           paint();
@@ -94,6 +106,8 @@ for (const transport of ["orb", "bar", "sound", "qr"]) {
     await sender
       .getByRole("button", { name: `Create ${transport}`, exact: true })
       .click();
+    if (transport === "qr")
+      await expect(sender.locator(".ultra-canvas")).toBeVisible();
     await receiver
       .getByRole("button", {
         name: transport === "sound" ? "Start microphone" : "Start camera",

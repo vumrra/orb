@@ -49,6 +49,7 @@ for (const [length, reduced] of [
     const sender = page.locator("#root"),
       receiver = page.locator("#receiver");
     await selectQr(sender);
+    await selectQr(receiver);
     let seed = 42;
     const message = Array.from({ length }, () => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
@@ -58,15 +59,13 @@ for (const [length, reduced] of [
     await sender
       .getByRole("button", { name: "Create qr", exact: true })
       .click();
-    await expect(
-      sender.getByLabel("QR code carrying the message"),
-    ).toBeVisible();
+    await expect(sender.getByLabel("Fast QR transfer board")).toBeVisible();
     await expect(receiver.locator(".app-shell")).toHaveAttribute(
       "data-transport",
-      "orb",
+      "qr",
     );
     await page.evaluate(() => {
-      const canvas = document.querySelector("#root .qr-canvas");
+      const canvas = document.querySelector("#root .ultra-canvas");
       Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
         configurable: true,
         value: async () => {
