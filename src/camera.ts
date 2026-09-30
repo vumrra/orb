@@ -68,7 +68,7 @@ export class Camera {
         facingMode: { ideal: facing },
         width: { ideal: options?.ultra || options?.color ? 2048 : 1280 },
         height: { ideal: options?.ultra || options?.color ? 2048 : 1280 },
-        frameRate: { ideal: options?.color ? 60 : 30 },
+        frameRate: { ideal: 30 },
       },
     });
     if (generation !== this.generation) {
@@ -127,7 +127,7 @@ export class Camera {
           ),
         );
       if (options?.color) {
-        interval = 1000 / 60 - 0.5;
+        interval = 1000 / 30 - 0.5;
         let scanning = false;
         const tickColor = async (time: number) => {
           if (generation !== this.generation || scanning) return;
@@ -142,7 +142,7 @@ export class Camera {
             last = time;
             const began = performance.now();
             let pixels: ImageData | undefined;
-            let packet: Uint8Array | null = null;
+            let packets: Uint8Array[] = [];
             try {
               const scale = Math.min(
                 1,
@@ -156,10 +156,11 @@ export class Camera {
               }
               ctx.drawImage(video, 0, 0, width, height);
               pixels = ctx.getImageData(0, 0, width, height);
-              packet = await this.color.scan(pixels);
+              packets = await this.color.scanAll(pixels);
               if (generation !== this.generation) return;
               // Only a bounds/CRC-validated packet confirms a visible carrier.
-              if (packet) {
+              for (const packet of packets) {
+                if (generation !== this.generation) break;
                 lastCandidate = time;
                 options.onColor?.(packet);
               }
@@ -173,11 +174,11 @@ export class Camera {
               return;
             } finally {
               pixels?.data.fill(0);
-              packet?.fill(0);
+              packets.forEach((packet) => packet.fill(0));
               ctx.clearRect(0, 0, canvas.width, canvas.height);
               scanning = false;
               interval = Math.max(
-                1000 / 60 - 0.5,
+                1000 / 30 - 0.5,
                 (performance.now() - began) * 1.1,
               );
             }

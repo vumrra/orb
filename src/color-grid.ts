@@ -2,6 +2,7 @@ import { MAX_FILE_BYTES, sanitizeName } from "./binary-transfer";
 import type { TransferMeta, VerifiedTransfer } from "./binary-transfer";
 import { crc32, MAX_TEXT_BYTES } from "./protocol";
 import { fileDigest } from "./file-digest";
+import { rsEncode } from "./sound-fec";
 
 export type ColorGrid = 64 | 128 | 256;
 const HEADER = 80;
@@ -11,16 +12,23 @@ export const COLOR_ENVELOPE_ALLOWANCE = 8 + NAME_LIMIT + MIME_LIMIT;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
 export const colorCapacity = (grid: ColorGrid) => (grid * grid * 3) / 8;
+// Each 128-byte stripe has 16 RS parity bytes (up to eight bad bytes).
+// Interleaving stripes spreads short rolling/shadow/scratch bands across words.
+export const COLOR_WORD_DATA = 128,
+  COLOR_WORD_BYTES = 144;
+export const COLOR_HEADER_BYTES = HEADER + 16;
 export function colorLayout(grid: ColorGrid) {
-  const top = 18 + Math.ceil((HEADER * 8) / grid);
-  return { width: grid + 24, height: top + grid + 12, top };
+  const top = 18 + Math.ceil((COLOR_HEADER_BYTES * 8) / grid);
+  const rows = Math.ceil(
+    ((colorCapacity(grid) / COLOR_WORD_DATA) * COLOR_WORD_BYTES * 8) /
+      (3 * grid),
+  );
+  return { width: grid + 28, height: top + rows + 18, top, rows };
 }
 export function colorGridForViewport(width: number, height: number): ColorGrid {
-  for (const grid of [256, 128, 64] as const) {
-    const l = colorLayout(grid);
-    if (width >= l.width * 3 && height >= l.height * 3) return grid;
-  }
-  throw new Error("More screen space is needed for a readable color grid.");
+  const l = colorLayout(64);
+  if (width >= l.width * 3 && height >= l.height * 3) return 64;
+  throw new Error("More screen space is needed for a readable color tile.");
 }
 const exp = new Uint8Array(512),
   log = new Uint8Array(256);
@@ -66,7 +74,7 @@ function readHeader(header: Uint8Array) {
     header[0] !== 67 ||
     header[1] !== 71 ||
     header[2] !== 82 ||
-    header[3] !== 2 ||
+    header[3] !== 3 ||
     ![6, 7, 8].includes(header[4]) ||
     header[5] > 2 ||
     header[6] ||
@@ -122,7 +130,7 @@ export async function createColorSource(
   input: Uint8Array,
   meta: TransferMeta,
   signal?: AbortSignal,
-  grid: ColorGrid = 256,
+  grid: ColorGrid = 64,
 ): Promise<ColorSource> {
   if (input.length > MAX_FILE_BYTES)
     throw new Error("Files must be at most 30,000,000 bytes.");
@@ -196,7 +204,7 @@ export async function createColorSource(
               role === 2 ? weights[slot][bytes[offset + j]] : bytes[offset + j];
         }
       } else payload.set(bytes.subarray(index * size, (index + 1) * size));
-      out.set([67, 71, 82, 2, Math.log2(grid), role]);
+      out.set([67, 71, 82, 3, Math.log2(grid), role]);
       out.set(id, 8);
       view.setUint32(24, bytes.length);
       view.setUint32(28, index);
@@ -436,45 +444,60 @@ export function colorRaster(packet: Uint8Array) {
     data[i + 1] = g;
     data[i + 2] = b;
   };
-  // Isolated neutral-white finders, with a black quiet region outside and inside.
-  for (const x0 of [3, l.width - 9])
-    for (const y0 of [3, l.height - 9])
-      for (let y = y0; y < y0 + 6; y++)
-        for (let x = x0; x < x0 + 6; x++) put(x, y, 255, 255, 255);
-  for (let y = 12; y < 16; y++)
-    for (let x = 0; x < p.grid; x++) {
-      const n = Math.floor((x * 8) / p.grid);
-      put(
-        12 + x,
-        y,
-        32 + 192 * (n & 1),
-        32 + 192 * ((n >> 1) & 1),
-        32 + 192 * ((n >> 2) & 1),
-      );
-    }
-  for (let k = 0; k < HEADER * 8; k++) {
-    const c = packet[k >> 3] & (1 << (k & 7)) ? 224 : 32;
-    put(12 + (k % p.grid), 17 + Math.floor(k / p.grid), c, c, c);
-  }
-  for (let k = 0; k < p.grid * p.grid; k++) {
-    const bit = k * 3,
-      i = bit >> 3,
-      shift = bit & 7,
-      n =
-        ((p.payload[i] >> shift) | ((p.payload[i + 1] ?? 0) << (8 - shift))) &
-        7;
+  // Inverted QR-style 1:1:3:1:1 nested finders. Black surrounds them in
+  // either UI theme. Every local tile carries its own four finders and CRC.
+  for (const x0 of [3, l.width - 10])
+    for (const y0 of [3, l.height - 10])
+      for (let y = 0; y < 7; y++)
+        for (let x = 0; x < 7; x++)
+          if (
+            x === 0 ||
+            x === 6 ||
+            y === 0 ||
+            y === 6 ||
+            (x >= 2 && x <= 4 && y >= 2 && y <= 4)
+          )
+            put(x0 + x, y0 + y, 255, 255, 255);
+  const palette = (x: number, y: number, n: number) =>
     put(
-      12 + (k % p.grid),
-      l.top + Math.floor(k / p.grid),
+      x,
+      y,
       32 + 192 * (n & 1),
       32 + 192 * ((n >> 1) & 1),
       32 + 192 * ((n >> 2) & 1),
     );
+  // Four observed palettes allow interpolation over an unevenly lit tile.
+  for (const y0 of [12, l.top + l.rows + 2])
+    for (let y = y0; y < y0 + 4; y++)
+      for (let x = 0; x < p.grid; x++)
+        palette(14 + x, y, Math.floor((x * 16) / p.grid) % 8);
+  const header = rsEncode(packet.subarray(0, HEADER));
+  for (let k = 0; k < header.length * 8; k++) {
+    const c = header[k >> 3] & (1 << (k & 7)) ? 224 : 32;
+    put(14 + (k % p.grid), 17 + Math.floor(k / p.grid), c, c, c);
   }
+  header.fill(0);
+  const words = p.size / COLOR_WORD_DATA;
+  const coded = new Uint8Array(words * COLOR_WORD_BYTES);
+  for (let w = 0; w < words; w++) {
+    const code = rsEncode(
+      p.payload.subarray(w * COLOR_WORD_DATA, (w + 1) * COLOR_WORD_DATA),
+    );
+    for (let j = 0; j < COLOR_WORD_BYTES; j++) coded[j * words + w] = code[j];
+    code.fill(0);
+  }
+  for (let k = 0; k < (coded.length * 8) / 3; k++) {
+    const bit = k * 3,
+      i = bit >> 3,
+      shift = bit & 7;
+    const n = ((coded[i] >> shift) | ((coded[i + 1] ?? 0) << (8 - shift))) & 7;
+    palette(14 + (k % p.grid), l.top + Math.floor(k / p.grid), n);
+  }
+  coded.fill(0);
   return { data, width: l.width, height: l.height };
 }
 // Also usable on a transformed canvas for raster fixtures. The live board uses
-// the identical raster with one nearest-neighbor drawImage per frame.
+// the identical raster with one nearest-neighbor drawImage per tile.
 export function drawColorGrid(
   ctx: CanvasRenderingContext2D,
   packet: Uint8Array,
@@ -486,10 +509,6 @@ export function drawColorGrid(
   try {
     ctx.fillStyle = "black";
     ctx.fillRect(0, 0, image.width * cell, image.height * cell);
-    ctx.fillStyle = "white";
-    for (const x of [3, image.width - 9])
-      for (const y of [3, image.height - 9])
-        ctx.fillRect(x * cell, y * cell, 6 * cell, 6 * cell);
     for (let y = 0; y < image.height; y++) {
       for (let x = 0; x < image.width;) {
         const i = (y * image.width + x) * 4,
@@ -501,7 +520,7 @@ export function drawColorGrid(
             break;
           end++;
         }
-        if (d[i] !== 255 && (d[i] || d[i + 1] || d[i + 2])) {
+        if (d[i] || d[i + 1] || d[i + 2]) {
           ctx.fillStyle = `rgb(${d[i]},${d[i + 1]},${d[i + 2]})`;
           ctx.fillRect(x * cell, y * cell, (end - x) * cell, cell);
         }

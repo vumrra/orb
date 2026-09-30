@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import { colorGridForViewport, colorLayout, colorRaster } from "./color-grid";
+import { colorLayout, colorRaster } from "./color-grid";
 import type { ColorSource } from "./color-grid";
 
 export function ColorBoard({
@@ -33,7 +33,8 @@ export function ColorBoard({
     buffer.height = layout.height;
     let raf = 0,
       last = -Infinity,
-      stopped = false;
+      stopped = false,
+      side = 1;
     const fail = (reason: unknown) => {
       if (stopped) return;
       stopped = true;
@@ -47,20 +48,40 @@ export function ColorBoard({
         const width =
             Math.min(innerWidth, shell?.clientWidth || innerWidth) - 40,
           height = innerHeight - 300;
-        if (colorGridForViewport(width, height) < source.grid)
-          throw new Error(
-            "The screen is too small for this color grid. More screen space is needed; restart the transfer after resizing.",
-          );
+        // Wire grid stays fixed for the whole transfer. Only the number of
+        // independently recoverable tiles changes when the viewport changes.
+        const nextSide = Math.max(
+          1,
+          Math.min(
+            3,
+            Math.floor(
+              Math.min(
+                width / (layout.width * 3),
+                height / (layout.height * 3),
+              ),
+            ),
+          ),
+        );
         const cell = Math.floor(
-          Math.min(width / layout.width, height / layout.height),
+          Math.min(
+            width / (layout.width * nextSide),
+            height / (layout.height * nextSide),
+          ),
         );
         if (cell < 3)
           throw new Error(
             "More screen space is needed for readable color cells.",
           );
-        const w = layout.width * cell,
-          h = layout.height * cell,
+        const w = layout.width * cell * nextSide,
+          h = layout.height * cell * nextSide,
           ratio = Math.max(1, Math.floor(globalThis.devicePixelRatio || 1));
+        if (
+          el.width === w * ratio &&
+          el.height === h * ratio &&
+          side === nextSide
+        )
+          return;
+        side = nextSide;
         stage.style.width = `${w}px`;
         stage.style.height = `${h}px`;
         stage.style.aspectRatio = `${w} / ${h}`;
@@ -69,6 +90,7 @@ export function ColorBoard({
         el.width = w * ratio;
         el.height = h * ratio;
         el.dataset.grid = String(source.grid);
+        el.dataset.tiles = String(side * side);
         el.dataset.cell = String(cell);
         last = -Infinity;
       } catch (reason) {
@@ -77,26 +99,36 @@ export function ColorBoard({
     };
     const tick = (now: number) => {
       if (stopped) return;
-      if (!document.hidden && now - last >= 1000 / 60 - 0.5) {
-        let packet: Uint8Array | undefined,
-          raster: ReturnType<typeof colorRaster> | undefined,
-          pixels: ImageData | undefined;
+      if (!document.hidden && now - last >= 1000 / 20 - 0.5) {
         try {
-          packet = source.next();
-          raster = colorRaster(packet);
-          pixels = bctx.createImageData(raster.width, raster.height);
-          pixels.data.set(raster.data);
-          bctx.putImageData(pixels, 0, 0);
           ctx.imageSmoothingEnabled = false;
-          ctx.drawImage(buffer, 0, 0, el.width, el.height);
-          bctx.clearRect(0, 0, buffer.width, buffer.height);
-          last = now;
+          for (let tile = 0; tile < side * side; tile++) {
+            let packet: Uint8Array | undefined,
+              raster: ReturnType<typeof colorRaster> | undefined,
+              pixels: ImageData | undefined;
+            try {
+              packet = source.next();
+              raster = colorRaster(packet);
+              pixels = bctx.createImageData(raster.width, raster.height);
+              pixels.data.set(raster.data);
+              bctx.putImageData(pixels, 0, 0);
+              ctx.drawImage(
+                buffer,
+                ((tile % side) * el.width) / side,
+                (Math.floor(tile / side) * el.height) / side,
+                el.width / side,
+                el.height / side,
+              );
+            } finally {
+              bctx.clearRect(0, 0, buffer.width, buffer.height);
+              packet?.fill(0);
+              raster?.data.fill(0);
+              pixels?.data.fill(0);
+            }
+          }
+          last = now; // Elapsed time, never catch-up bursts after a slow frame.
         } catch (reason) {
           fail(reason);
-        } finally {
-          packet?.fill(0);
-          raster?.data.fill(0);
-          pixels?.data.fill(0);
         }
       }
       if (!stopped) raf = requestAnimationFrame(tick);

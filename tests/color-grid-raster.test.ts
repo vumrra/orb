@@ -129,7 +129,7 @@ for (const grid of [64, 128, 256] as const)
   });
 it("reacquires a moving board after CRC misses, changes grid only through a valid header, rejects noise", async () => {
   const tracker = new ColorTracker(),
-    screen = createCanvas(1200, 1050),
+    screen = createCanvas(1200, 1200),
     ctx = screen.getContext("2d");
   for (const [grid, x, y] of [
     [64, 40, 40],
@@ -144,21 +144,21 @@ it("reacquires a moving board after CRC misses, changes grid only through a vali
       ),
       packet = s.next();
     ctx.fillStyle = "black";
-    ctx.fillRect(0, 0, 1200, 1050);
+    ctx.fillRect(0, 0, 1200, 1200);
     ctx.save();
     ctx.translate(x, y);
     drawColorGrid(ctx as unknown as CanvasRenderingContext2D, packet, 3);
     ctx.restore();
     let got: Uint8Array | null = null;
     for (let i = 0; i < 4 && !got; i++)
-      got = tracker.scan(ctx.getImageData(0, 0, 1200, 1050));
+      got = tracker.scan(ctx.getImageData(0, 0, 1200, 1200));
     expect(got).toEqual(packet);
     s.clear();
   }
   ctx.fillStyle = "white";
-  ctx.fillRect(0, 0, 1200, 1050);
+  ctx.fillRect(0, 0, 1200, 1200);
   for (let i = 0; i < 5; i++)
-    expect(tracker.scan(ctx.getImageData(0, 0, 1200, 1050))).toBeNull();
+    expect(tracker.scan(ctx.getImageData(0, 0, 1200, 1200))).toBeNull();
 });
 it("transfers an entire binary through rotated rasters and final SHA", async () => {
   const bytes = randomFillSync(new Uint8Array(20000)),
@@ -186,3 +186,24 @@ it("transfers an entire binary through rotated rasters and final SHA", async () 
   expect((await r.verify()).bytes).toEqual(bytes);
   s.clear();
 });
+for (const angle of [44, 91, 173, 271])
+  it(`locates a tile rotated ${angle} degrees without an alignment guide`, async () => {
+    const s = await createColorSource(
+      randomFillSync(new Uint8Array(3500)),
+      meta,
+    );
+    const packet = s.data(0),
+      l = colorLayout(s.grid);
+    const canvas = createCanvas(800, 800),
+      ctx = canvas.getContext("2d");
+    ctx.fillStyle = "#bbb";
+    ctx.fillRect(0, 0, 800, 800);
+    ctx.translate(425.35, 390.65);
+    ctx.rotate((angle * Math.PI) / 180);
+    ctx.translate(-l.width * 1.5, -l.height * 1.5);
+    drawColorGrid(ctx as unknown as CanvasRenderingContext2D, packet, 3);
+    expect(new ColorTracker().scan(ctx.getImageData(0, 0, 800, 800))).toEqual(
+      packet,
+    );
+    s.clear();
+  });

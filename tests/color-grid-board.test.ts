@@ -91,16 +91,19 @@ it("draws readable real cells, pauses hidden tabs, restores stage styles, never 
     .getContext("2d")
     .getImageData(0, 0, screen.width, screen.height);
   expect(new ColorTracker().scan(pixels)).not.toBeNull();
-  expect(stage.style.width).toBe(`${colorLayout(256).width * 3}px`);
-  expect(next).toHaveBeenCalledOnce();
+  expect(stage.style.width).toBe(`${colorLayout(64).width * 3 * 2}px`);
+  expect(new ColorTracker().scanAll(pixels)).toHaveLength(4);
+  expect(next).toHaveBeenCalledTimes(4);
   doc.hidden = true;
   tick(17);
-  expect(next).toHaveBeenCalledOnce();
+  expect(next).toHaveBeenCalledTimes(4);
   doc.hidden = false;
   tick(34);
-  expect(next).toHaveBeenCalledTimes(2);
+  expect(next).toHaveBeenCalledTimes(4);
   tick(51);
-  expect(next).toHaveBeenCalledTimes(3);
+  expect(next).toHaveBeenCalledTimes(8);
+  tick(5000); // long pauses never produce catch-up bursts
+  expect(next).toHaveBeenCalledTimes(12);
   if (cleanup) cleanup();
   expect(clear).not.toHaveBeenCalled();
   expect(disconnect).toHaveBeenCalledOnce();
@@ -118,7 +121,7 @@ it("draws readable real cells, pauses hidden tabs, restores stage styles, never 
   expect(errors).not.toHaveBeenCalled();
   s.clear();
 });
-it("fails visibly on a too-small resize instead of changing the grid or scaling unreadable cells", async () => {
+it("reflows desktop tiles to one mobile tile without resetting wire grid, then fails clearly below readable size", async () => {
   const { resize, tick, screen } = setup(),
     errors = vi.fn();
   const s = await createColorSource(new Uint8Array([1]), {
@@ -130,13 +133,25 @@ it("fails visibly on a too-small resize instead of changing the grid or scaling 
   ColorBoard({ source: s, onError: errors });
   const cleanup = hooks.effect!();
   tick(0);
-  vi.stubGlobal("innerWidth", 390);
+  vi.stubGlobal("innerWidth", 375);
+  vi.stubGlobal("innerHeight", 667);
   resize();
   tick(100);
+  expect(errors).not.toHaveBeenCalled();
+  expect(s.grid).toBe(64);
+  expect(next).toHaveBeenCalledTimes(5);
+  expect(
+    new ColorTracker().scanAll(
+      screen.getContext("2d").getImageData(0, 0, screen.width, screen.height),
+    ),
+  ).toHaveLength(1);
+  vi.stubGlobal("innerWidth", 250);
+  resize();
+  tick(200);
   expect(errors).toHaveBeenCalledOnce();
   expect(String(errors.mock.calls[0][0])).toMatch(/space|small/i);
-  expect(s.grid).toBe(256);
-  expect(next).toHaveBeenCalledOnce();
+  expect(s.grid).toBe(64);
+  expect(next).toHaveBeenCalledTimes(5);
   expect(
     screen
       .getContext("2d")

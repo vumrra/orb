@@ -535,7 +535,9 @@ export function App() {
               ? `${progress.count} / ${progress.total} frames received`
               : candidate
                 ? "Signal candidate · checking data…"
-                : "Searching…"
+                : transport === "qr" && ultra
+                  ? "Searching… Keep one full color tile visible."
+                  : "Searching…"
             : "";
 
   return (
@@ -833,6 +835,9 @@ export function App() {
                 <span className="live-dot" />
                 {transport === "sound" ? "Acoustic stream" : "Optical stream"}
               </div>
+              {colorSource && (
+                <p className="file-note">Keep one full color tile visible.</p>
+              )}
               <Primary reduced={true} onClick={() => reset()}>
                 Stop sending <span aria-hidden="true">×</span>
               </Primary>

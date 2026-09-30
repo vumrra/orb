@@ -3,18 +3,28 @@ import {
   colorLayout,
   parseColorPacket,
   readColorHeader,
+  COLOR_WORD_DATA,
+  COLOR_WORD_BYTES,
+  COLOR_HEADER_BYTES,
 } from "./color-grid";
 import type { ColorGrid } from "./color-grid";
+import { rsDecode } from "./sound-fec";
 type Pixels = { width: number; height: number; data: Uint8ClampedArray };
 type Point = { x: number; y: number };
-type Finder = Point & { area: number };
+type Finder = Point & { module: number; quality: number };
 type Geometry = {
   points: Point[];
   grid: ColorGrid;
   width: number;
   height: number;
-  offsets: Int32Array;
 };
+const CELL_SAMPLES = [
+  [0, 0],
+  [-0.2, -0.2],
+  [0.2, -0.2],
+  [-0.2, 0.2],
+  [0.2, 0.2],
+];
 // Same square-to-quadrilateral homography as optical.ts, expressed in normalized
 // finder coordinates. No screen placement or fixture corners are assumed.
 function projection(p: Point[], grid: ColorGrid) {
@@ -30,8 +40,8 @@ function projection(p: Point[], grid: ColorGrid) {
     h = (ax * dy - dx * ay) / det,
     l = colorLayout(grid);
   return (x: number, y: number) => {
-    const u = (x - 6) / (l.width - 12),
-      v = (y - 6) / (l.height - 12),
+    const u = (x - 6.5) / (l.width - 13),
+      v = (y - 6.5) / (l.height - 13),
       d = 1 + g * u + h * v;
     return {
       x:
@@ -58,30 +68,51 @@ function valid(image: Pixels) {
     image.data.length === image.width * image.height * 4
   );
 }
+const distance = (a: Point, b: Point) => Math.hypot(a.x - b.x, a.y - b.y);
 function finders({ width, height, data }: Pixels): Finder[] {
-  // <= 1,048,576 coarse samples even at full 2048²; never flood full RGBA.
-  const step = Math.max(1, Math.ceil(Math.max(width, height) / 700)),
-    w = Math.ceil(width / step),
-    h = Math.ceil(height / step);
+  // Local mean, bounded to one megapixel. A bright lamp elsewhere cannot move
+  // the threshold here; the nested ring test rejects plain bright rectangles.
+  const step = Math.max(1, Math.ceil(Math.max(width, height) / 1024));
+  const w = Math.ceil(width / step),
+    h = Math.ceil(height / step),
+    stride = w + 1;
+  const gray = new Uint8Array(w * h),
+    integral = new Uint32Array((w + 1) * (h + 1));
+  const luminance = (x: number, y: number) => {
+    x = Math.floor(x);
+    y = Math.floor(y);
+    if (x < 0 || x >= width || y < 0 || y >= height) return 0;
+    const i = (y * width + x) * 4;
+    return (data[i] + 2 * data[i + 1] + data[i + 2]) / 4;
+  };
+  for (let y = 0; y < h; y++) {
+    let sum = 0;
+    for (let x = 0; x < w; x++) {
+      const value = (gray[y * w + x] = luminance(
+        x * step + 0.5,
+        y * step + 0.5,
+      ));
+      sum += value;
+      integral[(y + 1) * stride + x + 1] = integral[y * stride + x + 1] + sum;
+    }
+  }
   const mask = new Uint8Array(w * h),
     queue = new Int32Array(w * h);
-  let peak = 0;
   for (let y = 0; y < h; y++)
     for (let x = 0; x < w; x++) {
-      const i = (y * step * width + x * step) * 4,
-        lo = Math.min(data[i], data[i + 1], data[i + 2]),
-        hi = Math.max(data[i], data[i + 1], data[i + 2]);
-      if (hi - lo < 35) peak = Math.max(peak, lo);
+      const x0 = Math.max(0, x - 16),
+        x1 = Math.min(w, x + 17);
+      const y0 = Math.max(0, y - 16),
+        y1 = Math.min(h, y + 17);
+      const mean =
+        (integral[y1 * stride + x1] -
+          integral[y0 * stride + x1] -
+          integral[y1 * stride + x0] +
+          integral[y0 * stride + x0]) /
+        ((x1 - x0) * (y1 - y0));
+      mask[y * w + x] = gray[y * w + x] > mean + 12 ? 1 : 0;
     }
-  if (peak < 100) return [];
-  const threshold = peak - Math.max(10, peak * 0.045),
-    found: Finder[] = [];
-  for (let y = 0; y < h; y++)
-    for (let x = 0; x < w; x++) {
-      const i = (y * step * width + x * step) * 4;
-      mask[y * w + x] =
-        Math.min(data[i], data[i + 1], data[i + 2]) >= threshold ? 1 : 0;
-    }
+  const found: Finder[] = [];
   for (let n = 0; n < mask.length; n++) {
     if (!mask[n]) continue;
     let head = 0,
@@ -121,187 +152,349 @@ function finders({ width, height, data }: Pixels): Finder[] {
       bh = y1 - y0 + 1;
     if (
       tail < 4 ||
-      tail > 5000 ||
-      bw / bh < 0.45 ||
-      bw / bh > 2.2 ||
-      tail / (bw * bh) < 0.45 ||
-      bw * step > width / 6 ||
-      bh * step > height / 6
+      tail > 1600 ||
+      bw / bh < 0.5 ||
+      bw / bh > 2 ||
+      // A square rotated 45 degrees occupies half its axis-aligned box.
+      tail / (bw * bh) < 0.42
     )
       continue;
-    // Refine centroid at native resolution, retaining antialiased edge weights.
+    // Refine the isolated center at native resolution using edge weights.
+    const left = Math.max(0, x0 * step - step),
+      right = Math.min(width - 1, x1 * step + step);
+    const top = Math.max(0, y0 * step - step),
+      bottom = Math.min(height - 1, y1 * step + step);
+    let low = 255,
+      high = 0;
+    for (let y = top; y <= bottom; y++)
+      for (let x = left; x <= right; x++) {
+        const v = luminance(x, y);
+        low = Math.min(low, v);
+        high = Math.max(high, v);
+      }
+    if (high - low < 35) continue;
     let sx = 0,
       sy = 0,
       weight = 0;
-    for (
-      let y = Math.max(0, y0 * step - step);
-      y <= Math.min(height - 1, y1 * step + step);
-      y++
-    )
-      for (
-        let x = Math.max(0, x0 * step - step);
-        x <= Math.min(width - 1, x1 * step + step);
-        x++
-      ) {
-        const i = (y * width + x) * 4,
-          value = Math.min(data[i], data[i + 1], data[i + 2]);
-        const q = Math.max(0, (value - peak * 0.15) / (peak * 0.85));
+    for (let y = top; y <= bottom; y++)
+      for (let x = left; x <= right; x++) {
+        const q = Math.max(0, (luminance(x, y) - low) / (high - low));
         sx += (x + 0.5) * q;
         sy += (y + 0.5) * q;
         weight += q;
       }
-    if (weight) found.push({ x: sx / weight, y: sy / weight, area: weight });
+    if (!weight) continue;
+    const center = { x: sx / weight, y: sy / weight },
+      module = Math.sqrt(weight) / 3;
+    if (module < 1.4 || module > 22) continue;
+    let quality = 0;
+    for (let angle = 0; angle < Math.PI / 2; angle += Math.PI / 12) {
+      let contrast = 255;
+      for (let side = 0; side < 4; side++) {
+        const dx = Math.cos(angle + (side * Math.PI) / 2) * module;
+        const dy = Math.sin(angle + (side * Math.PI) / 2) * module;
+        const sample = (r: number) =>
+          luminance(center.x + dx * r, center.y + dy * r);
+        const white = Math.min(sample(0), sample(3));
+        const black = Math.max(sample(2), sample(4.3));
+        contrast = Math.min(contrast, white - black);
+      }
+      quality = Math.max(quality, contrast);
+    }
+    if (quality > 28) found.push({ ...center, module, quality });
   }
+  gray.fill(0);
+  integral.fill(0);
   mask.fill(0);
   queue.fill(0);
-  return found.sort((a, b) => b.area - a.area).slice(0, 10);
+  return found.sort((a, b) => b.quality - a.quality).slice(0, 64);
 }
-function decode(
-  image: Pixels,
-  points: Point[],
-  grid: ColorGrid,
-  cached?: Int32Array,
-) {
+
+function decode(image: Pixels, points: Point[], grid: ColorGrid) {
   const project = projection(points, grid);
   if (!project) return null;
   const l = colorLayout(grid),
     { data, width, height } = image;
-  const at = (x: number, y: number) => {
-    const q = project(x, y),
-      px = Math.floor(q.x),
-      py = Math.floor(q.y);
-    return px >= 0 && px < width && py >= 0 && py < height
-      ? (py * width + px) * 4
-      : -1;
-  };
-  const low = [255, 255, 255],
-    high = [0, 0, 0];
-  for (let n = 0; n < 8; n++) {
-    const i = at(12 + ((n + 0.5) * grid) / 8, 14);
-    if (i < 0) return null;
-    for (let c = 0; c < 3; c++) {
-      low[c] = Math.min(low[c], data[i + c]);
-      high[c] = Math.max(high[c], data[i + c]);
+  // Average five interior samples with bilinear pixel weights. The footprint
+  // stays inside the central half of a cell, avoiding adjacent-cell bleeding.
+  const sample = (x: number, y: number): number[] | null => {
+    const result = [0, 0, 0];
+    for (const [dx, dy] of CELL_SAMPLES) {
+      const q = project(x + dx, y + dy),
+        px = q.x - 0.5,
+        py = q.y - 0.5;
+      const ix = Math.floor(px),
+        iy = Math.floor(py),
+        fx = px - ix,
+        fy = py - iy;
+      if (
+        !Number.isFinite(px + py) ||
+        ix < 0 ||
+        iy < 0 ||
+        ix + 1 >= width ||
+        iy + 1 >= height
+      )
+        return null;
+      const i = (iy * width + ix) * 4;
+      for (let c = 0; c < 3; c++)
+        result[c] +=
+          ((data[i + c] * (1 - fx) + data[i + 4 + c] * fx) * (1 - fy) +
+            (data[i + width * 4 + c] * (1 - fx) +
+              data[i + width * 4 + 4 + c] * fx) *
+              fy) /
+          5;
     }
-  }
-  if (high.some((v, c) => v - low[c] < 40)) return null;
-  const mid = low.map((v, c) => (v + high[c]) / 2),
-    header = new Uint8Array(80);
-  for (let k = 0; k < 640; k++) {
-    const i = at(12.5 + (k % grid), 17.5 + Math.floor(k / grid));
-    if (i < 0) {
-      header.fill(0);
+    return result;
+  };
+  const palettes: number[][][] = [];
+  for (const y of [14, l.top + l.rows + 4])
+    for (let side = 0; side < 2; side++) {
+      const palette: number[][] = [];
+      for (let n = 0; n < 8; n++) {
+        const rgb = sample(14 + grid * (side / 2 + (n + 0.5) / 16), y);
+        if (!rgb) return null;
+        palette.push(rgb);
+      }
+      // Distinct observed colors are required before even reading a header.
+      for (let a = 0; a < 8; a++)
+        for (let b = a + 1; b < 8; b++)
+          if (
+            palette[a].reduce((s, v, c) => s + (v - palette[b][c]) ** 2, 0) <
+            400
+          )
+            return null;
+      palettes.push(palette);
+    }
+  const classify = (x: number, y: number, mono = false) => {
+    const rgb = sample(x, y);
+    if (!rgb) return -1;
+    const u = Math.max(0, Math.min(1, (x - 14 - grid / 4) / (grid / 2)));
+    const v = Math.max(0, Math.min(1, (y - 14) / (l.top + l.rows - 10)));
+    let best = Infinity,
+      symbol = -1;
+    for (let n = 0; n < 8; n += mono ? 7 : 1) {
+      let distance = 0;
+      for (let c = 0; c < 3; c++) {
+        const top = palettes[0][n][c] * (1 - u) + palettes[1][n][c] * u;
+        const bottom = palettes[2][n][c] * (1 - u) + palettes[3][n][c] * u;
+        distance += (rgb[c] - top * (1 - v) - bottom * v) ** 2;
+      }
+      if (distance < best) {
+        best = distance;
+        symbol = n;
+      }
+    }
+    return symbol;
+  };
+  const headerCode = new Uint8Array(COLOR_HEADER_BYTES);
+  for (let k = 0; k < headerCode.length * 8; k++) {
+    const n = classify(14.5 + (k % grid), 17.5 + Math.floor(k / grid), true);
+    if (n < 0) {
+      headerCode.fill(0);
       return null;
     }
-    if (data[i] > mid[0]) header[k >> 3] |= 1 << (k & 7);
+    if (n === 7) headerCode[k >> 3] |= 1 << (k & 7);
   }
+  const header = rsDecode(headerCode);
+  headerCode.fill(0);
+  if (!header) return null;
   const parsed = readColorHeader(header);
   if (!parsed || parsed.grid !== grid) {
     header.fill(0);
     return null;
   }
-  const offsets = cached ?? new Int32Array(grid * grid),
-    packet = new Uint8Array(80 + colorCapacity(grid));
+  const words = colorCapacity(grid) / COLOR_WORD_DATA;
+  const coded = new Uint8Array(words * COLOR_WORD_BYTES),
+    packet = new Uint8Array(80 + parsed.size);
   packet.set(header);
   header.fill(0);
-  for (let k = 0; k < grid * grid; k++) {
-    const i = cached
-      ? offsets[k]
-      : (offsets[k] = at(
-          12.5 + (k % grid),
-          l.top + 0.5 + Math.floor(k / grid),
-        ));
-    if (i < 0) {
-      packet.fill(0);
-      if (!cached) offsets.fill(0);
-      return null;
+  let complete = false;
+  try {
+    for (let k = 0; k < (coded.length * 8) / 3; k++) {
+      const n = classify(14.5 + (k % grid), l.top + 0.5 + Math.floor(k / grid));
+      if (n < 0) return null;
+      const bit = k * 3,
+        i = bit >> 3,
+        shift = bit & 7;
+      coded[i] |= n << shift;
+      if (shift > 5) coded[i + 1] |= n >> (8 - shift);
     }
-    const n =
-        (data[i] > mid[0] ? 1 : 0) |
-        (data[i + 1] > mid[1] ? 2 : 0) |
-        (data[i + 2] > mid[2] ? 4 : 0),
-      bit = k * 3,
-      j = 80 + (bit >> 3),
-      shift = bit & 7;
-    packet[j] |= n << shift;
-    if (shift > 5) packet[j + 1] |= n >> (8 - shift);
+    const code = new Uint8Array(COLOR_WORD_BYTES);
+    try {
+      for (let w = 0; w < words; w++) {
+        for (let j = 0; j < COLOR_WORD_BYTES; j++)
+          code[j] = coded[j * words + w];
+        const decoded = rsDecode(code);
+        if (!decoded) return null;
+        packet.set(decoded, 80 + w * COLOR_WORD_DATA);
+        decoded.fill(0);
+      }
+    } finally {
+      code.fill(0);
+    }
+    complete = !!parseColorPacket(packet);
+    return complete ? packet : null;
+  } finally {
+    coded.fill(0);
+    if (!complete) packet.fill(0);
   }
-  if (!parseColorPacket(packet)) {
-    packet.fill(0);
-    if (!cached) offsets.fill(0);
-    return null;
+}
+
+function candidates(found: Finder[]) {
+  const result: { points: Finder[]; grid: ColorGrid; score: number }[] = [],
+    seen = new Set<string>();
+  const spans = ([64, 128, 256] as const).flatMap((grid) => {
+    const l = colorLayout(grid);
+    return [l.width - 13, l.height - 13];
+  });
+  for (let a = 0; a < found.length; a++) {
+    const p = found[a];
+    // Rank by physical finder spacing, not merely nearest components: color
+    // cells can resemble tiny rings inside a dense nine-tile board.
+    const near = found
+      .map((q, i) => {
+        const d = distance(p, q),
+          cells = d / ((p.module + q.module) / 2);
+        return {
+          i,
+          d,
+          fit: Math.min(...spans.map((span) => Math.abs(cells / span - 1))),
+        };
+      })
+      .filter(
+        ({ i, d }) =>
+          i !== a &&
+          d / p.module > 40 &&
+          d / p.module < 420 &&
+          found[i].module / p.module > 0.65 &&
+          found[i].module / p.module < 1.55,
+      )
+      .sort((a, b) => a.fit - b.fit || a.d - b.d)
+      .slice(0, 12);
+    for (let ib = 0; ib < near.length; ib++)
+      for (let ic = ib + 1; ic < near.length; ic++) {
+        const b = near[ib].i,
+          c = near[ic].i,
+          q = found[b],
+          r = found[c];
+        const cosine = Math.abs(
+          ((q.x - p.x) * (r.x - p.x) + (q.y - p.y) * (r.y - p.y)) /
+            (near[ib].d * near[ic].d),
+        );
+        if (cosine > 0.45) continue;
+        const guess = { x: q.x + r.x - p.x, y: q.y + r.y - p.y };
+        let d = -1,
+          delta = Math.min(near[ib].d, near[ic].d) * 0.28;
+        for (let j = 0; j < found.length; j++) {
+          if (j === a || j === b || j === c) continue;
+          const dd = distance(found[j], guess);
+          if (dd < delta) {
+            d = j;
+            delta = dd;
+          }
+        }
+        if (d < 0) continue;
+        const ids = [a, b, c, d].sort((a, b) => a - b),
+          key = ids.join(",");
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const points = [p, q, found[d], r],
+          modules = points.map((p) => p.module);
+        if (Math.max(...modules) / Math.min(...modules) > 1.65) continue;
+        const module = modules.reduce((s, v) => s + v) / 4;
+        const edges = points
+          .map((p, i) => distance(p, points[(i + 1) % 4]) / module)
+          .sort((a, b) => a - b);
+        for (const grid of [64, 128, 256] as const) {
+          const l = colorLayout(grid),
+            small = l.width - 13,
+            large = l.height - 13;
+          const error =
+            Math.abs((edges[0] + edges[1]) / (2 * small) - 1) +
+            Math.abs((edges[2] + edges[3]) / (2 * large) - 1);
+          if (error < 0.6)
+            result.push({
+              points,
+              grid,
+              score: error + cosine + delta / (module * small),
+            });
+        }
+      }
   }
-  return { packet, offsets };
+  return result.sort((a, b) => a.score - b.score).slice(0, 48);
 }
 export class ColorTracker {
-  private geometry: Geometry | null = null;
+  private geometries: Geometry[] = [];
+  private scans = 0;
   private misses = 0;
   clear() {
-    this.geometry?.offsets.fill(0);
-    this.geometry = null;
-    this.misses = 0;
+    this.geometries = [];
+    this.scans = this.misses = 0;
   }
+  // Compatibility for single-tile callers. Live Camera consumes every tile.
   scan(image: Pixels): Uint8Array<ArrayBuffer> | null {
-    if (!valid(image)) return null;
-    const g = this.geometry;
-    if (g && g.width === image.width && g.height === image.height) {
-      const result = decode(image, g.points, g.grid, g.offsets);
-      if (result) {
-        this.misses = 0;
-        return result.packet;
+    const packets = this.scanAll(image),
+      first = packets.shift() ?? null;
+    packets.forEach((p) => p.fill(0));
+    return first;
+  }
+  scanAll(image: Pixels): Uint8Array<ArrayBuffer>[] {
+    if (!valid(image)) return [];
+    const packets: Uint8Array<ArrayBuffer>[] = [],
+      good: Geometry[] = [];
+    const old = this.geometries.filter(
+      (g) => g.width === image.width && g.height === image.height,
+    );
+    for (const g of old) {
+      const packet = decode(image, g.points, g.grid);
+      if (packet) {
+        packets.push(packet);
+        good.push(g);
       }
     }
-    // Reacquire immediately on first CRC miss, then at most one of three frames.
-    if (++this.misses > 1 && this.misses % 3 !== 0) return null;
-    const found = finders(image);
-    let attempts = 0;
-    for (let a = 0; a < found.length; a++)
-      for (let b = a + 1; b < found.length; b++)
-        for (let c = b + 1; c < found.length; c++)
-          for (let d = c + 1; d < found.length; d++) {
-            const points = [found[a], found[b], found[c], found[d]],
-              cx = points.reduce((s, p) => s + p.x, 0) / 4,
-              cy = points.reduce((s, p) => s + p.y, 0) / 4;
-            points.sort(
-              (p, q) =>
-                Math.atan2(p.y - cy, p.x - cx) - Math.atan2(q.y - cy, q.x - cx),
-            );
-            const edges = points.map((p, i) =>
-              Math.hypot(
-                p.x - points[(i + 1) % 4].x,
-                p.y - points[(i + 1) % 4].y,
-              ),
-            );
-            if (
-              Math.min(...edges) < 100 ||
-              Math.max(...edges) / Math.min(...edges) > 2 ||
-              Math.max(...points.map((p) => p.area)) /
-                Math.min(...points.map((p) => p.area)) >
-                3
-            )
-              continue;
-            if (++attempts > 12) return null;
-            for (const direction of [1, -1])
-              for (let turn = 0; turn < 4; turn++)
-                for (const grid of [256, 128, 64] as const) {
-                  const ordered = points.map(
-                    (_, i) => points[(turn + direction * i + 8) % 4],
-                  );
-                  const result = decode(image, ordered, grid);
-                  if (result) {
-                    this.geometry?.offsets.fill(0);
-                    this.geometry = {
-                      points: ordered,
-                      grid,
-                      width: image.width,
-                      height: image.height,
-                      offsets: result.offsets,
-                    };
-                    this.misses = 0;
-                    return result.packet;
-                  }
-                }
-          }
-    return null;
+    // Search periodically even when one tile remains locked, so newly visible
+    // tiles are acquired. Failed geometry never becomes a confirmed carrier.
+    const scan = this.scans++;
+    this.misses = packets.length ? 0 : this.misses + 1;
+    if (
+      (good.length === old.length && good.length && scan % 6 !== 0) ||
+      (this.misses > 1 && this.misses % 3 !== 0)
+    )
+      return packets;
+    const found = finders(image),
+      used = good.flatMap((g) => g.points);
+    for (const candidate of candidates(found)) {
+      if (good.length >= 9) break;
+      if (
+        candidate.points.some((p) =>
+          used.some((q) => distance(p, q) < p.module * 2),
+        )
+      )
+        continue;
+      let matched = false;
+      for (const direction of [1, -1]) {
+        for (let turn = 0; turn < 4; turn++) {
+          const points = candidate.points.map(
+            (_, i) => candidate.points[(turn + direction * i + 8) % 4],
+          );
+          const packet = decode(image, points, candidate.grid);
+          if (!packet) continue;
+          packets.push(packet);
+          const g = {
+            points,
+            grid: candidate.grid,
+            width: image.width,
+            height: image.height,
+          };
+          good.push(g);
+          used.push(...points);
+          matched = true;
+          break;
+        }
+        if (matched) break;
+      }
+    }
+    this.geometries = good.length ? good : old.slice(0, 9);
+    return packets;
   }
 }

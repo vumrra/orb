@@ -63,7 +63,7 @@ function setup(width = 1600, height = 1000) {
     tick: (n: number) => tick(n),
   };
 }
-it("receives a complete off-center rotated color binary through Camera at 60fps request, with no QR substitution", async () => {
+it("receives a complete off-center rotated color binary through Camera at 30fps request, with no QR substitution", async () => {
   const { screen, video, tick, getUserMedia } = setup(),
     ctx = screen.getContext("2d");
   const bytes = Uint8Array.from({ length: 32000 }, (_, i) => i * 37),
@@ -81,7 +81,7 @@ it("receives a complete off-center rotated color binary through Camera at 60fps 
       seen.push(p);
     },
   });
-  expect(getUserMedia.mock.calls[0][0].video.frameRate).toEqual({ ideal: 60 });
+  expect(getUserMedia.mock.calls[0][0].video.frameRate).toEqual({ ideal: 30 });
   expect(getUserMedia.mock.calls[0][0].video.width).toEqual({ ideal: 2048 });
   for (let i = 0; i < s.total * 3 && !r.ready; i++) {
     const p = s.next();
@@ -107,7 +107,7 @@ it("bounds full-FOV capture to 2048, pauses hidden, and reports no candidate for
   const { video, doc, tick, captures } = setup(3000, 1800),
     camera = new Camera(),
     candidate = vi.fn(),
-    scan = vi.spyOn(ColorTracker.prototype, "scan");
+    scan = vi.spyOn(ColorTracker.prototype, "scanAll");
   await camera.start(video, "user", vi.fn(), vi.fn(), candidate, "qr", {
     color: true,
   });
@@ -126,12 +126,12 @@ it("bounds full-FOV capture to 2048, pauses hidden, and reports no candidate for
 });
 it("allows only one decode in flight, clears late pixels/packets, and never rearms after stop", async () => {
   const { video, tick, stop } = setup();
-  let release!: (p: Uint8Array) => void;
-  const scan = vi.spyOn(ColorTracker.prototype, "scan").mockImplementation(
+  let release!: (p: Uint8Array[]) => void;
+  const scan = vi.spyOn(ColorTracker.prototype, "scanAll").mockImplementation(
     () =>
-      new Promise<Uint8Array>((resolve) => {
+      new Promise<Uint8Array[]>((resolve) => {
         release = resolve;
-      }) as unknown as Uint8Array<ArrayBuffer>,
+      }) as unknown as Uint8Array<ArrayBuffer>[],
   );
   const camera = new Camera(),
     delivered = vi.fn();
@@ -144,7 +144,7 @@ it("allows only one decode in flight, clears late pixels/packets, and never rear
   expect(requestAnimationFrame).toHaveBeenCalledOnce();
   camera.stop();
   const stale = new Uint8Array([3, 7, 9]);
-  release(stale);
+  release([stale]);
   await work;
   expect(delivered).not.toHaveBeenCalled();
   expect(stale.every((v) => !v)).toBe(true);
@@ -190,4 +190,23 @@ it("releases a permission grant after stop, and propagates color callback errors
   expect(captured?.every((v) => v === 0)).toBe(true);
   expect(video.srcObject).toBeNull();
   s.clear();
+});
+it("delivers multiple tiles, stops between callbacks and wipes even undelivered packets", async () => {
+  const { video, tick } = setup(),
+    camera = new Camera();
+  const packets = [
+    new Uint8Array([11]),
+    new Uint8Array([22]),
+    new Uint8Array([33]),
+  ];
+  vi.spyOn(ColorTracker.prototype, "scanAll").mockReturnValue(packets);
+  const delivered = vi.fn(() => camera.stop());
+  await camera.start(video, "user", vi.fn(), vi.fn(), vi.fn(), "qr", {
+    color: true,
+    onColor: delivered,
+  });
+  await tick(0);
+  expect(delivered).toHaveBeenCalledOnce();
+  expect(packets.every((p) => p.every((v) => v === 0))).toBe(true);
+  expect(requestAnimationFrame).toHaveBeenCalledOnce();
 });

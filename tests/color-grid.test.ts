@@ -158,7 +158,7 @@ it("cancels preparation, clears borrowed source state, and prevents stale verifi
 });
 it("reassembles exactly 30,000,000 raw bytes lazily with bounded parity cache and rejects +1", async () => {
   const bytes = randomFillSync(new Uint8Array(MAX_FILE_BYTES)),
-    s = await color.createColorSource(bytes, meta),
+    s = await color.createColorSource(bytes, meta, undefined, 256),
     r = new color.ColorCollector();
   expect(s.total).toBe(
     Math.ceil(
@@ -200,10 +200,10 @@ it("changes lap phase so a receiver sampling every second frame eventually recei
   expect((await r.verify()).bytes).toEqual(bytes);
   s.clear();
 });
-it("selects largest grid fitting at least three CSS pixels per cell including all overhead", () => {
+it("selects camera-safe 64-cell tiles at every viewport and enforces readable minimum", () => {
   for (const grid of [64, 128, 256] as const) {
     const l = color.colorLayout(grid);
-    expect(color.colorGridForViewport(l.width * 3, l.height * 3)).toBe(grid);
+    expect(color.colorGridForViewport(l.width * 3, l.height * 3)).toBe(64);
   }
   expect(color.colorGridForViewport(350, 450)).toBe(64);
   expect(() => color.colorGridForViewport(200, 200)).toThrow(/space/i);

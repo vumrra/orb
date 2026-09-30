@@ -106,13 +106,31 @@ for (const width of [375, 768, 1440]) {
     await expect(particles).toHaveCount(0);
   });
 }
+// Conservative 64-cell tiles; desktop throughput comes from independent tiles.
+// These are browser pixel fixtures, not a claim about physical phone speed.
 for (const scenario of [
-  { grid: 64, width: 750, height: 950, bytes: 65536, angle: 0, fps: 60 },
-  { grid: 128, width: 1440, height: 1100, bytes: 262144, angle: 2, fps: 30 },
-  { grid: 256, width: 2200, height: 1300, bytes: 1048576, angle: -2, fps: 60 },
-  { grid: 256, width: 2200, height: 1300, bytes: 10000000, angle: 0, fps: 60 },
+  { tiles: 1, width: 750, height: 950, bytes: 32768, angle: 0, fps: 30 },
   {
-    grid: 64,
+    tiles: 4,
+    width: 1440,
+    height: 1100,
+    bytes: 131072,
+    angle: 2,
+    fps: 30,
+    partial: true,
+  },
+  {
+    tiles: 9,
+    width: 2200,
+    height: 1450,
+    bytes: 262144,
+    angle: -2,
+    fps: 30,
+    partial: true,
+  },
+  { tiles: 4, width: 1440, height: 1100, bytes: 1048576, angle: 0, fps: 30 },
+  {
+    tiles: 1,
     width: 750,
     height: 950,
     bytes: 0,
@@ -121,7 +139,7 @@ for (const scenario of [
     image: true,
   },
 ]) {
-  test(`Ultrafast actual colored pixels to verified file grid=${scenario.grid}, angle=${scenario.angle}, fps=${scenario.fps}`, async ({
+  test(`Ultrafast actual colored pixels to verified file tiles=${scenario.tiles}, angle=${scenario.angle}, fps=${scenario.fps}, image=${!!scenario.image}`, async ({
     page,
   }) => {
     test.setTimeout(90000);
@@ -133,7 +151,7 @@ for (const scenario of [
       scenario.width,
       scenario.height,
     );
-    if (scenario.grid === 64)
+    if (scenario.tiles === 1)
       await page.emulateMedia({ reducedMotion: "reduce" });
     const data = scenario.image
       ? Buffer.from(
@@ -162,16 +180,22 @@ for (const scenario of [
     await expect(sender.locator(".color-canvas")).toBeVisible();
     await expect(sender.locator(".color-canvas")).toHaveAttribute(
       "data-grid",
-      String(scenario.grid),
+      "64",
+    );
+    await expect(sender.locator(".color-canvas")).toHaveAttribute(
+      "data-tiles",
+      String(scenario.tiles),
     );
     await expect(sender.locator(".ultra-canvas")).toHaveCount(0);
-    await page.evaluate(({ angle, fps }) => {
+    await page.evaluate(({ angle, fps, partial, tiles }) => {
       Object.defineProperty(navigator.mediaDevices, "getUserMedia", {
         configurable: true,
         value: async () => {
           const source = document.querySelector("#root .color-canvas");
           const scene = document.createElement("canvas");
-          scene.width = source.width + 180;
+          scene.width = partial
+            ? Math.round((source.width / Math.sqrt(tiles)) * 1.25 + 180)
+            : source.width + 180;
           scene.height = source.height + 140;
           const ctx = scene.getContext("2d"),
             stream = scene.captureStream(fps);
@@ -179,13 +203,32 @@ for (const scenario of [
           const paint = () => {
             if (stream.getTracks().every((t) => t.readyState === "ended"))
               return;
-            ctx.fillStyle = "#171a1e";
+            ctx.fillStyle = "#d0d3d5";
             ctx.fillRect(0, 0, scene.width, scene.height);
+            // Bright distractors and off-center partial framing: only the left
+            // column remains fully visible. No data or geometry enters Camera.
+            ctx.fillStyle = "white";
+            for (let i = 0; i < 8; i++) ctx.fillRect(9 + i * 47, 9, 24, 24);
             ctx.save();
-            ctx.translate(scene.width / 2 + 15, scene.height / 2 - 10);
+            ctx.translate(110.35, 65.7);
             ctx.rotate((angle * Math.PI) / 180);
-            ctx.drawImage(source, -source.width / 2, -source.height / 2);
+            ctx.filter = "blur(0.45px)";
+            ctx.drawImage(source, 0, 0);
             ctx.restore();
+            if (partial) {
+              const shade = ctx.createLinearGradient(
+                0,
+                0,
+                scene.width,
+                scene.height,
+              );
+              shade.addColorStop(0, "rgba(0,0,0,.4)");
+              shade.addColorStop(1, "rgba(0,0,0,.08)");
+              ctx.fillStyle = shade;
+              ctx.fillRect(0, 0, scene.width, scene.height);
+              ctx.fillStyle = "white";
+              ctx.fillRect(8, 8, 38, 38);
+            }
             requestAnimationFrame(paint);
           };
           paint();
@@ -280,4 +323,66 @@ test("Ultrafast preserves selected file across speed changes and cancels late ca
     .toBe(true);
   await expect(page.locator(".camera-active")).toHaveCount(0);
   await expect(page.locator(".ultra-particles")).toHaveCount(0);
+});
+test("Ultrafast reflows from nine tiles to a 375px sender, preserves the session and animates under reduced motion", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1200, height: 1450 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/");
+  await qr(page);
+  await page.getByRole("button", { name: "Ultrafast", exact: true }).click();
+  await page.getByLabel("Choose local file").setInputFiles({
+    name: "resize.bin",
+    mimeType: "",
+    buffer: randomBytes(32768),
+  });
+  await page.getByRole("button", { name: "Create qr", exact: true }).click();
+  const board = page.locator(".color-canvas");
+  await expect(board).toHaveAttribute("data-tiles", "9");
+  const session = () =>
+    board.evaluate(async (c) => {
+      const { ColorTracker } = await import("/src/color-scan.ts");
+      const packets = new ColorTracker().scanAll(
+        c.getContext("2d").getImageData(0, 0, c.width, c.height),
+      );
+      const ids = packets.map((p) => Array.from(p.subarray(8, 24)).join(","));
+      packets.forEach((p) => p.fill(0));
+      return ids;
+    });
+  let before;
+  await expect
+    .poll(async () => {
+      before = await session();
+      return before.length;
+    })
+    .toBe(9);
+  expect(new Set(before).size).toBe(1);
+  await page.setViewportSize({ width: 375, height: 812 });
+  await expect(board).toHaveAttribute("data-tiles", "1");
+  await expect(board).toHaveAttribute("data-grid", "64");
+  await expect.poll(session).toEqual([before[0]]);
+  const checksum = () =>
+    board.evaluate((c) =>
+      c
+        .getContext("2d")
+        .getImageData(0, 0, c.width, c.height)
+        .data.reduce((s, v, i) => (s + v * ((i % 31) + 1)) >>> 0, 0),
+    );
+  const first = await checksum();
+  await expect.poll(checksum).not.toBe(first);
+  for (const theme of ["dark", "light"]) {
+    if (theme === "light")
+      await page
+        .getByRole("button", { name: "Light mode", exact: true })
+        .click();
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await expect.poll(session).toEqual([before[0]]);
+  }
+  await page.getByRole("button", { name: "Stop sending", exact: true }).click();
+  await expect(board).toHaveCount(0);
 });
